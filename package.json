@@ -24,6 +24,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
+    "prepare": "tsup",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
