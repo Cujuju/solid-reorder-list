@@ -1,0 +1,54 @@
+{
+  "name": "@cujuju/solid-reorder-list",
+  "version": "0.1.0",
+  "description": "Drag-to-reorder primitive for SolidJS — variable-height items, single-axis, edge-overlap collision.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./css": "./css/reorder.css"
+  },
+  "files": [
+    "dist",
+    "css",
+    "src"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "solid-js": "^1.8.0"
+  },
+  "devDependencies": {
+    "solid-js": "^1.9.5",
+    "tsup": "^8.4.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.1.1",
+    "jsdom": "^26.1.0"
+  },
+  "keywords": [
+    "solidjs",
+    "solid",
+    "drag",
+    "reorder",
+    "sortable",
+    "dnd",
+    "primitive"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cujuju/solid-reorder-list.git"
+  },
+  "author": "Cujuju"
+}

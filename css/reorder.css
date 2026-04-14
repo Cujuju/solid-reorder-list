@@ -1,0 +1,23 @@
+/**
+ * Default styles for @cujuju/solid-reorder-list.
+ *
+ * Import via: import '@cujuju/solid-reorder-list/css'
+ *
+ * These are optional — you can skip this import and style the activeClass
+ * yourself. The primitive sets inline transforms, z-index, and position
+ * during drag; this file only adds the visual "lift" shadow and cursor.
+ */
+
+/* Active (dragged) item — only static visual properties here.
+   Transform, transition, z-index, and position are owned by JS
+   to avoid conflicts with inline translateY/translateX. */
+.reorder-active {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  cursor: grabbing;
+}
+
+/* Reorder items — disable text selection so pointer-down initiates drag,
+   not text selection. Targets the data attribute set by itemProps(). */
+[data-reorder-id] {
+  user-select: none;
+}
