@@ -214,6 +214,14 @@ const reorder = createReorderList({
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   outline: 2px solid blue;
 }
+
+/* REQUIRED when skipping the default CSS — see "Browser defaults"
+   section below. Without this, mousedown over text inside an item
+   starts a text selection that competes with the drag. */
+[data-reorder-id] {
+  user-select: none;
+  -webkit-user-select: none;
+}
 ```
 
 ### Inline styles managed by the primitive
@@ -238,6 +246,35 @@ Every item gets `data-reorder-id="{id}"` via `itemProps`. This is useful for:
 - The `[data-reorder-id] { user-select: none }` CSS rule (included in default CSS)
 - Debugging (inspect which element maps to which ID)
 - Custom CSS selectors targeting all reorderable items
+
+## Browser defaults to suppress
+
+This library uses Pointer Events, which (unlike HTML5 `draggable=true`) leave native browser behaviors intact. Two defaults can interfere with smooth reorder UX. Both are fixable consumer-side, and forgetting either produces visible bugs.
+
+### Text selection during pointerdown
+
+Without `user-select: none`, mousedown over text inside a reorderable item starts a text selection that competes with the drag — visible as the drag failing to activate cleanly while the text gets highlighted under the cursor.
+
+The default CSS (`import '@cujuju/solid-reorder-list/css'`) handles this with a `[data-reorder-id] { user-select: none }` rule. **If you skip the default CSS** and roll your own visual style, replicate the rule yourself — see the snippet in [Custom styles](#custom-styles).
+
+### Natively-draggable inner elements
+
+`<img>` and `<a href>` elements default to `draggable=true` in browsers. When the user mousedowns on one inside a reorderable item, the browser starts its own HTML5 drag-image operation simultaneously with this library's pointer-event drag. Visible symptoms:
+
+- "No-drop" cursor (⊘) appears immediately on mousedown
+- The dragged item ends up offset from the cursor once the library's own drag activates at `activateDistance`
+- A ghost image of the inner element follows the cursor independently
+
+This bites hardest when the inner element occupies most of the reorderable item's surface (e.g., a tab whose entire visible area is a cover image).
+
+Disable native drag on those elements:
+
+```tsx
+<img src={...} alt="" draggable={false} />
+<a href={...} draggable={false}>{label}</a>
+```
+
+This applies whether you use the default CSS or roll your own — the default CSS doesn't help here because there's no CSS-only way to disable the `draggable` attribute on every nested element. The fix has to be on the elements themselves.
 
 ## Patterns and Recipes
 
