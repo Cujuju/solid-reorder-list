@@ -70,6 +70,7 @@ interface ReorderListOptions {
   activeClass?: string;
   dragScale?: number;
   stopPropagation?: boolean;
+  skipSelector?: string;
 }
 ```
 
@@ -83,6 +84,7 @@ interface ReorderListOptions {
 | `activeClass` | `string` | `'reorder-active'` | CSS class added to the dragged item's element via `classList`. Use this for visual feedback (box-shadow, outline, background, etc.). The default CSS file styles this class. |
 | `dragScale` | `number` | `0.97` | Scale factor applied to the dragged item via CSS `scale()` transform. Creates a subtle "lift" effect. Set to `1.0` to disable the scale effect entirely. |
 | `stopPropagation` | `boolean` | `true` | Whether to call `e.stopPropagation()` on the pointerdown event. Set to `false` when you have nested reorder lists or need pointer events to bubble to a parent handler. |
+| `skipSelector` | `string` | `'button, input, a, [role="button"]'` | CSS selector matched via `closest()` from the pointerdown target. When matched, drag activation is skipped — guards interactive children from accidental drags. Override when the draggable item itself has interactive semantics (e.g. a `<div role="button">` that IS the draggable). Set to an empty string to disable the skip entirely. The default is also exported as `DEFAULT_SKIP_SELECTOR` for composition: `skipSelector: DEFAULT_SKIP_SELECTOR + ', [data-no-drag]'`. |
 
 ## API
 
@@ -299,6 +301,29 @@ const innerReorder = createReorderList({
   stopPropagation: false, // Let events bubble to outer list
 });
 ```
+
+### Draggable items with interactive root semantics
+
+The default skip selector matches `[role="button"]` so accidental drags on focusable children are avoided. If your draggable item's *root* element itself uses `role="button"` (or `<button>`, `<a>`, `<input>`), the default selector causes drag to never activate at all. Override `skipSelector` to allow drag on the root while still guarding child controls:
+
+```tsx
+import { createReorderList, DEFAULT_SKIP_SELECTOR } from '@cujuju/solid-reorder-list';
+
+const reorder = createReorderList({
+  ids,
+  onReorder,
+  // Allow drag on the [role="button"] root, but still skip on children
+  // marked with data-no-drag (e.g. a close-X span inside the tab).
+  skipSelector: 'input, a, [data-no-drag]',
+});
+
+<div role="button" {...reorder.itemProps(id)}>
+  <span>{label}</span>
+  <span data-no-drag onClick={onClose}>×</span>
+</div>
+```
+
+Pass an empty string to disable the skip entirely (use with care — accidental drags on form controls become possible).
 
 ### Persisting order to a server
 

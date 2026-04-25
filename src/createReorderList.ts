@@ -38,7 +38,22 @@ export interface ReorderListOptions {
   /** Whether to call stopPropagation on pointerdown. Set to false to allow
    *  pointer events to reach parent elements. (default: true) */
   stopPropagation?: boolean;
+  /** CSS selector matched via `closest()` from the pointerdown target.
+   *  When the selector matches, drag activation is skipped — useful for
+   *  guarding interactive children (default behaviour) but configurable
+   *  for cases where the draggable item itself has interactive
+   *  semantics (e.g. a `<div role="button">` that IS the draggable).
+   *  Defaults to {@link DEFAULT_SKIP_SELECTOR}. Set to an empty string
+   *  to disable the skip entirely. */
+  skipSelector?: string;
 }
+
+/** Default selector for {@link ReorderListOptions.skipSelector}. Skips
+ *  drag activation when the pointerdown target (or any ancestor) is a
+ *  focusable interactive control. Exported so consumers can compose
+ *  rather than copy-paste, e.g.
+ *  `skipSelector: DEFAULT_SKIP_SELECTOR + ', [data-no-drag]'`. */
+export const DEFAULT_SKIP_SELECTOR = 'button, input, a, [role="button"]';
 
 interface CachedRect {
   start: number;  // top (y) or left (x)
@@ -71,6 +86,7 @@ export function createReorderList(options: ReorderListOptions) {
   // 0.97 = 3% shrink. Set to 1.0 for no scale. Consumers can override.
   const DRAG_SCALE = options.dragScale ?? 0.97;
   const getStopPropagation = () => options.stopPropagation ?? true;
+  const getSkipSelector = () => options.skipSelector ?? DEFAULT_SKIP_SELECTOR;
 
   // Registered elements keyed by ID
   const nodes = new Map<string, HTMLElement>();
@@ -367,8 +383,10 @@ export function createReorderList(options: ReorderListOptions) {
     // Don't start drag on interactive children (buttons, inputs, links).
     // Without this, clicking a button and moving 5px activates a drag
     // instead of the button's click handler — especially problematic for
-    // delete buttons and trailing-column controls.
-    if ((e.target as HTMLElement).closest('button, input, a, [role="button"]')) return;
+    // delete buttons and trailing-column controls. Selector is
+    // configurable via `skipSelector`; pass an empty string to disable.
+    const skip = getSkipSelector();
+    if (skip && (e.target as HTMLElement).closest(skip)) return;
 
     if (getStopPropagation()) e.stopPropagation();
 

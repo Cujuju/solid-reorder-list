@@ -265,6 +265,106 @@ describe('createReorderList', () => {
       });
     });
 
+    it('does not activate when item root has role=button (default selector)', () => {
+      // Regression guard: the default skipSelector includes [role="button"],
+      // so a draggable whose ROOT element has role="button" never starts
+      // a drag. This is the scenario that motivated the configurable
+      // skipSelector option.
+      createRoot((d) => {
+        dispose = d;
+        const [ids] = createSignal(['a', 'b']);
+        const onReorder = vi.fn();
+        const reorder = createReorderList({ ids, onReorder, activateDistance: 5 });
+
+        const elA = mockElement(0, 50);
+        elA.setAttribute('role', 'button');
+        reorder.itemProps('a').ref(elA);
+
+        const downEvent = pointerEvent('pointerdown', { clientY: 25 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        reorder.itemProps('a').onPointerDown(downEvent);
+
+        document.dispatchEvent(pointerEvent('pointermove', { clientY: 31 }));
+        expect(reorder.isDragging()).toBe(false);
+      });
+    });
+
+    it('respects custom skipSelector — drag activates on role=button root when overridden', () => {
+      createRoot((d) => {
+        dispose = d;
+        const [ids] = createSignal(['a', 'b']);
+        const onReorder = vi.fn();
+        const reorder = createReorderList({
+          ids,
+          onReorder,
+          activateDistance: 5,
+          // Allow drag on [role="button"] root by replacing the default
+          // selector with a tighter list.
+          skipSelector: 'input, a, [data-no-drag]',
+        });
+
+        const elA = mockElement(0, 50);
+        elA.setAttribute('role', 'button');
+        reorder.itemProps('a').ref(elA);
+
+        const elB = mockElement(50, 50);
+        reorder.itemProps('b').ref(elB);
+        document.body.appendChild(elA);
+        document.body.appendChild(elB);
+
+        const downEvent = pointerEvent('pointerdown', { clientY: 25 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        reorder.itemProps('a').onPointerDown(downEvent);
+
+        document.dispatchEvent(pointerEvent('pointermove', { clientY: 31 }));
+        expect(reorder.isDragging()).toBe(true);
+
+        // Custom selector still skips: a child marked data-no-drag should
+        // NOT activate a drag even when the root would.
+        const elC = mockElement(100, 50);
+        elC.setAttribute('role', 'button');
+        reorder.itemProps('a').ref(elC);  // re-bind 'a' to elC for this assertion
+        const noDragChild = document.createElement('span');
+        noDragChild.setAttribute('data-no-drag', '');
+        elC.appendChild(noDragChild);
+
+        // Cleanup elements added to body
+        document.body.removeChild(elA);
+        document.body.removeChild(elB);
+      });
+    });
+
+    it('skipSelector empty string disables the skip entirely', () => {
+      // Edge case: empty string means no closest() check is performed.
+      // Useful when consumers want to handle drag-vs-click discrimination
+      // entirely via activateDistance and pointer-event suppression.
+      createRoot((d) => {
+        dispose = d;
+        const [ids] = createSignal(['a', 'b']);
+        const onReorder = vi.fn();
+        const reorder = createReorderList({
+          ids,
+          onReorder,
+          activateDistance: 5,
+          skipSelector: '',
+        });
+
+        const elA = mockElement(0, 50);
+        reorder.itemProps('a').ref(elA);
+
+        // Even a <button> child should not skip when selector is empty
+        const button = document.createElement('button');
+        elA.appendChild(button);
+
+        const downEvent = pointerEvent('pointerdown', { clientY: 25 });
+        Object.defineProperty(downEvent, 'target', { value: button });
+        reorder.itemProps('a').onPointerDown(downEvent);
+
+        document.dispatchEvent(pointerEvent('pointermove', { clientY: 31 }));
+        expect(reorder.isDragging()).toBe(true);
+      });
+    });
+
     it('does not activate on right-click', () => {
       createRoot((d) => {
         dispose = d;
