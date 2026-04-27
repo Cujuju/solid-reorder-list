@@ -174,13 +174,69 @@ export function createReorderGrid(options: ReorderGridOptions) {
     return Math.abs(a.contentTop - b.contentTop) < cellHeight * 0.1;
   }
 
-  /** Hit-test a content-frame pointer against the engine's
-   *  effectiveRects[]. First match wins (flat-order tie-break for
-   *  4-way corners). When no rect contains the point, returns the
-   *  cell whose centre minimises Euclidean distance from the point. */
+  /** Hit-test a content-frame pointer against the engine's effective
+   *  rects, with stickiness applied to currentTarget for hysteresis.
+   *
+   *  Pass 1 — sticky-currentTarget: if currentTarget !== sourceIndex,
+   *  compute its EXTENDED rect (extends the side facing source by
+   *  half-cell magnitudes proportional to source→target unit-vector
+   *  components). If the pointer falls inside that extended rect,
+   *  return currentTarget without a flip. This is the hysteresis: the
+   *  dragged item "sticks" to its current target — pointer must move
+   *  past the natural boundary AND a half-cell extension into the
+   *  source-side gap before the swap drops.
+   *
+   *  Pass 2 — first-match: pointer is outside the sticky zone; do a
+   *  normal point-in-rect check against effectiveRects[] (which are
+   *  natural inflated rects, never per-target-mutated). First match
+   *  wins (flat-order tie-break for 4-way corners).
+   *
+   *  Pass 3 — nearest-by-centre fallback: pointer is in a gap or
+   *  clearly outside the grid. Returns the cell whose centre
+   *  minimises Euclidean distance.
+   *
+   *  Hysteresis is computed ON-THE-FLY at hit-test time, not as a
+   *  per-transition mutation of effectiveRects. This avoids the
+   *  oscillation bug where reset+rebias-on-each-target-change would
+   *  flip the boundary by 2*halfShift between transitions and push
+   *  the pointer into the new target's biased zone, causing rapid
+   *  back-and-forth flipping on small ±X% pointer motion. */
   function hitTest(point: { x: number; y: number }): number {
     if (!drag) return -1;
-    const { effectiveRects, rects } = drag;
+    const { effectiveRects, rects, currentTarget, sourceIndex, cellWidth, cellHeight } = drag;
+
+    // Pass 1: sticky-currentTarget extension.
+    // Base is the INFLATED effectiveRect (consistent with Pass 2's
+    // tessellation), extended further toward source by half-cell
+    // magnitudes proportional to the source→target unit-vector
+    // components. Pure horizontal: full half-cellWidth on the
+    // source-facing side, zero on the perpendicular axis.
+    if (currentTarget !== sourceIndex && currentTarget >= 0 && currentTarget < effectiveRects.length) {
+      const cur = effectiveRects[currentTarget];
+      const src = rects[sourceIndex];
+      const tgtCx = (cur.contentLeft + cur.contentRight) / 2;
+      const tgtCy = (cur.contentTop + cur.contentBottom) / 2;
+      const srcCx = (src.contentLeft + src.contentRight) / 2;
+      const srcCy = (src.contentTop + src.contentBottom) / 2;
+      const dx = tgtCx - srcCx;
+      const dy = tgtCy - srcCy;
+      const mag = Math.hypot(dx, dy);
+      if (mag > 0) {
+        const dxU = dx / mag;
+        const dyU = dy / mag;
+        const extendX = Math.abs(dxU) * cellWidth * HYSTERESIS_FRACTION;
+        const extendY = Math.abs(dyU) * cellHeight * HYSTERESIS_FRACTION;
+        const left = cur.contentLeft - (dxU > 0 ? extendX : 0);
+        const right = cur.contentRight + (dxU < 0 ? extendX : 0);
+        const top = cur.contentTop - (dyU > 0 ? extendY : 0);
+        const bottom = cur.contentBottom + (dyU < 0 ? extendY : 0);
+        if (point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) {
+          return currentTarget;
+        }
+      }
+    }
+
+    // Pass 2: first-match against natural effective (inflated) rects.
     for (let i = 0; i < effectiveRects.length; i++) {
       const r = effectiveRects[i];
       if (
@@ -190,8 +246,8 @@ export function createReorderGrid(options: ReorderGridOptions) {
         return i;
       }
     }
-    // Fallback — nearest by centre distance against the original
-    // (un-inflated) rects, since centres are stable under hysteresis.
+
+    // Pass 3: nearest by centre distance against original rects.
     let bestIdx = 0;
     let bestD = Infinity;
     for (let i = 0; i < rects.length; i++) {
@@ -345,78 +401,16 @@ export function createReorderGrid(options: ReorderGridOptions) {
     cancel.add();
   }
 
-  // Hysteresis fraction — how much of a cell's width/height the
-  // current target's boundary is biased on the side facing the
-  // previous target. 0.5 = half-cell. Mirrors 1-D's halfShift idiom
-  // (createReorderList.ts updateEffectivePositions) translated to
-  // 2-D rects with axis-magnitude-proportional bias.
+  // Hysteresis fraction — half-cell magnitude that currentTarget's
+  // rect is sticky-extended toward source during hit-test. 0.5 =
+  // half-cell. See hitTest() Pass 1 for the model. Mirrors 1-D's
+  // halfShift idiom (createReorderList.ts updateEffectivePositions)
+  // translated to a hit-test-time stickiness instead of per-transition
+  // rect mutation, which avoids the oscillation bug an earlier
+  // implementation hit (reset+rebias-on-each-transition flipped the
+  // boundary by 2*halfShift between transitions and pushed pointer
+  // into the new target's biased zone).
   const HYSTERESIS_FRACTION = 0.5;
-
-  /** Reset effectiveRects[] back to inflated rects (gutter/2 on all
-   *  sides), then apply axis-magnitude-proportional hysteresis to the
-   *  prev/new target pair. Called on every target change.
-   *
-   *  Pure horizontal swap (next is right of prev): bias is full
-   *  half-cell on the horizontal axis, zero on vertical.
-   *  Pure vertical: mirror.
-   *  Diagonal (row-wrap): both axes proportional to |unit-vector
-   *  components|, so the perceived reversal-travel scales with the
-   *  swap distance. */
-  function applyHysteresis(state: GridDragState, prevTarget: number, newTarget: number) {
-    const { rects, effectiveRects, cellWidth, cellHeight, gutterX, gutterY } = state;
-
-    // Reset all effectiveRects to inflated copies of rects[].
-    for (let i = 0; i < rects.length; i++) {
-      const r = rects[i];
-      const e = effectiveRects[i];
-      e.contentLeft = r.contentLeft - gutterX / 2;
-      e.contentTop = r.contentTop - gutterY / 2;
-      e.contentRight = r.contentRight + gutterX / 2;
-      e.contentBottom = r.contentBottom + gutterY / 2;
-      e.width = r.width + gutterX;
-      e.height = r.height + gutterY;
-    }
-
-    if (prevTarget === newTarget) return;
-
-    const prevR = rects[prevTarget];
-    const nextR = rects[newTarget];
-    if (!prevR || !nextR) return;
-
-    const cxPrev = (prevR.contentLeft + prevR.contentRight) / 2;
-    const cyPrev = (prevR.contentTop + prevR.contentBottom) / 2;
-    const cxNext = (nextR.contentLeft + nextR.contentRight) / 2;
-    const cyNext = (nextR.contentTop + nextR.contentBottom) / 2;
-    const dx = cxNext - cxPrev;
-    const dy = cyNext - cyPrev;
-    const mag = Math.hypot(dx, dy);
-    if (mag === 0) return;
-
-    const dxU = dx / mag;
-    const dyU = dy / mag;
-    const shrinkX = Math.abs(dxU) * cellWidth * HYSTERESIS_FRACTION;
-    const shrinkY = Math.abs(dyU) * cellHeight * HYSTERESIS_FRACTION;
-
-    const eNext = effectiveRects[newTarget];
-    const ePrev = effectiveRects[prevTarget];
-
-    // Shrink newTarget on the side facing prev (boundary between them
-    // shifts into newTarget's territory) so reversing requires extra
-    // pointer travel.
-    if (dxU > 0) eNext.contentLeft += shrinkX;
-    else if (dxU < 0) eNext.contentRight -= shrinkX;
-    if (dyU > 0) eNext.contentTop += shrinkY;
-    else if (dyU < 0) eNext.contentBottom -= shrinkY;
-
-    // Expand prevTarget toward newTarget — the boundary on the prev
-    // side stays put, and the source's "fallback zone" extends so the
-    // user can reverse without immediately re-triggering on prev's
-    // adjacent boundary.
-    if (dxU > 0) ePrev.contentRight += shrinkX;
-    else if (dxU < 0) ePrev.contentLeft -= shrinkX;
-    if (dyU > 0) ePrev.contentBottom += shrinkY;
-    else if (dyU < 0) ePrev.contentTop -= shrinkY;
-  }
 
   /** Apply per-item flat-order displacement transforms when the target
    *  changes. Each item between sourceIndex and newTarget (inclusive
@@ -486,10 +480,8 @@ export function createReorderGrid(options: ReorderGridOptions) {
     const newTarget = hitTest(pointerContent);
 
     if (newTarget !== drag.currentTarget) {
-      const prevTarget = drag.currentTarget;
       drag.currentTarget = newTarget;
       setTargetIdx(newTarget);
-      applyHysteresis(drag, prevTarget, newTarget);
       applyDisplacement(drag);
     }
   }

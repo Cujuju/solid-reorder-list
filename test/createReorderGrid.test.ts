@@ -693,46 +693,101 @@ describe('createReorderGrid', () => {
   });
 
   describe('hysteresis (U4 — covers AE2)', () => {
+    it('does NOT oscillate when pointer moves back-and-forth across the natural boundary by less than half-cellWidth (regression for prev/next-pair bias bug)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b', 'c', 'd']);
+        const grid = createReorderGrid({ ids, onReorder });
+        // 4-cell horizontal strip, 100x100 cells, no gutter (boundaries at 100, 200, 300).
+        const elA = mockElement(0, 0, 100, 100);
+        const elB = mockElement(100, 0, 100, 100);
+        const elC = mockElement(200, 0, 100, 100);
+        const elD = mockElement(300, 0, 100, 100);
+        grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
+        grid.itemProps('c').ref(elC);
+        grid.itemProps('d').ref(elD);
+
+        // Activate drag on 'a' (centre 50, 50). Move pointer ±20px around
+        // the natural boundary at x=100. With half-cellWidth = 50 hysteresis,
+        // the boundary 1→0 should be at original + 50 = 150. Pointer at 80
+        // should NOT trigger swap back from target=1 to target=0.
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        // Cross threshold + advance to target=1 (cell B's centre at 150).
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 56, clientY: 50 }));
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 150, clientY: 50 }));
+        expect(grid.targetIndex()).toBe(1);
+
+        // Now oscillate: move LEFT 20px past natural boundary, then RIGHT 20px.
+        // With hysteresis, target should STAY at 1 across all oscillations.
+        for (let i = 0; i < 8; i++) {
+          // Pointer at x=80 (20px left of natural boundary 100, but right of
+          // biased boundary at 50 = source's centre). Should remain target=1.
+          document.dispatchEvent(pointerEvent('pointermove', { clientX: 80, clientY: 50 }));
+          expect(grid.targetIndex()).toBe(1);
+          // Pointer at x=120 (20px right of natural boundary). Should remain target=1.
+          document.dispatchEvent(pointerEvent('pointermove', { clientX: 120, clientY: 50 }));
+          expect(grid.targetIndex()).toBe(1);
+        }
+
+        // Confirm: only ONE displaced cell transform (cell B), and it stays
+        // displaced across the oscillations.
+        expect(elB.style.transform).toContain('translate(-100px,');
+        expect(elC.style.transform).toBe('');
+        expect(elD.style.transform).toBe('');
+      });
+    });
+
     it('reversal from target=N+1 back to N requires extra pointer travel (pure horizontal)', () => {
       createRoot((d) => {
         dispose = d;
         const { grid, cells } = build4x3();
+        // Layout: 4×3 grid, cellWidth=140, gutterX=12. Effective inflated
+        // rects use gutter/2 padding: cell 0 left=−6 right=146; cell 1
+        // left=146 right=298 (touching at content x=146).
         // Drag from index 0 (centre 70, 105) → target 1 (centre 222, 105).
-        // Pure horizontal swap.
         const downEvent = pointerEvent('pointerdown', { clientX: 70, clientY: 105 });
         Object.defineProperty(downEvent, 'target', { value: cells[0] });
         grid.itemProps('a').onPointerDown(downEvent);
         document.dispatchEvent(pointerEvent('pointermove', { clientX: 74, clientY: 109 }));
 
-        // Move into cell 1's territory by crossing the natural boundary.
-        // Cell 0 right edge = 140; cell 1 left edge = 152. Boundary at ~146.
-        // Move pointer to clientX=160 → well into cell 1.
+        // Pure horizontal advance into cell 1's territory.
         document.dispatchEvent(pointerEvent('pointermove', { clientX: 160, clientY: 105 }));
         expect(grid.targetIndex()).toBe(1);
 
-        // After hysteresis: effectiveRects[1] is shrunk on the LEFT by
-        // cellWidth * 0.5 = 70px. So effectiveRects[1].contentLeft is now
-        // 152 - gutterX/2 + 70 = 146 + 70 = 216 (in content frame).
-        // To reverse to target=0, pointer must cross BACK past 216.
-        // First try: pointer at clientX=180 (still > 216? no, 180 < 216 → outside cell 1).
-        // Hmm, 180 is less than 216. Let's check what happens.
+        // Hysteresis (sticky-currentTarget extension): pointer needs to
+        // exit cell 1's EXTENDED rect to drop target back to 0. With
+        // source→target unit-vector (1, 0), cell 1's left edge is
+        // extended LEFTWARD by cellWidth * 0.5 = 70px. So extended
+        // left = effective left (146) − 70 = 76.
+        //
+        // Moving back to clientX=120 (which is past the natural
+        // boundary 146 — would trigger flip in non-hysteresis model)
+        // is STILL inside cell 1's extended rect [76, 298]. Target
+        // stays at 1.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 120, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(1);
 
-        // Move back to clientX=180 — should this revert to target=0?
-        document.dispatchEvent(pointerEvent('pointermove', { clientX: 180, clientY: 105 }));
-        // 180 < 216 → outside cell 1's effective rect → reverts to nearest cell.
-        // But cell 0 effective rect is also expanded right by 70px:
-        // contentRight = 140 + gutterX/2 + 70 = 146 + 70 = 216.
-        // So cell 0's effectiveRect is [-6, -6] to [216, 216]. Pointer at 180,105
-        // is inside cell 0's expanded zone → target should revert to 0.
+        // Moving further back to clientX=80 — STILL inside extended
+        // rect (80 > 76). Target stays 1. Hysteresis still holding.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 80, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(1);
+
+        // Crossing the extended boundary at clientX=70 — pointer is
+        // 70 < 76. Falls through Pass 1 (sticky), reaches Pass 2 (first
+        // match against natural inflated rects). Cell 0's inflated
+        // rect = [−6, 146]. 70 ∈ [−6, 146] → returns 0. Target drops.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 70, clientY: 105 }));
         expect(grid.targetIndex()).toBe(0);
 
-        // Now from target=0, attempt to advance to target=1 again.
-        // Hysteresis re-applied: cell 1 shrunk on LEFT (now opposite direction).
-        // Wait — from 1→0, dxU = -1, so cell 0 (newTarget) is shrunk on RIGHT
-        // by 70px, cell 1 (prevTarget) is expanded on LEFT by 70px.
-        // To re-advance, pointer must cross past cell 0's effective right (= 216 - 70 = 146).
-        // Pointer at clientX=200 should already be past 146 → target=1.
-        document.dispatchEvent(pointerEvent('pointermove', { clientX: 200, clientY: 105 }));
+        // Reverse direction: now at target=0 (= sourceIndex). Pass 1
+        // skips (currentTarget === sourceIndex). Pass 2 against natural
+        // rects. Pointer back at clientX=160 is in cell 1's natural
+        // inflated rect [146, 298]. Target → 1.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 160, clientY: 105 }));
         expect(grid.targetIndex()).toBe(1);
       });
     });
