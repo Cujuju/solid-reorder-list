@@ -16,6 +16,9 @@
  */
 
 import { createSignal, createRoot, onCleanup, getOwner } from 'solid-js';
+import { DEFAULT_SKIP_SELECTOR, blockNextClick, createCancelListeners } from './shared';
+
+export { DEFAULT_SKIP_SELECTOR };
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -47,13 +50,6 @@ export interface ReorderListOptions {
    *  to disable the skip entirely. */
   skipSelector?: string;
 }
-
-/** Default selector for {@link ReorderListOptions.skipSelector}. Skips
- *  drag activation when the pointerdown target (or any ancestor) is a
- *  focusable interactive control. Exported so consumers can compose
- *  rather than copy-paste, e.g.
- *  `skipSelector: DEFAULT_SKIP_SELECTOR + ', [data-no-drag]'`. */
-export const DEFAULT_SKIP_SELECTOR = 'button, input, a, [role="button"]';
 
 interface CachedRect {
   start: number;  // top (y) or left (x)
@@ -249,7 +245,7 @@ export function createReorderList(options: ReorderListOptions) {
     }
 
     document.body.style.cursor = 'grabbing';
-    addCancelListeners();
+    cancel.add();
   }
 
   function updateDrag(pointerPos: number) {
@@ -304,7 +300,7 @@ export function createReorderList(options: ReorderListOptions) {
     if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
     const { sourceIndex, currentTarget } = drag;
 
-    removeCancelListeners();
+    cancel.remove();
     setActiveId(null);
     setTargetIdx(-1);
     clearDragStyles();
@@ -320,7 +316,7 @@ export function createReorderList(options: ReorderListOptions) {
   function cancelDrag() {
     if (!drag) return;
     if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
-    removeCancelListeners();
+    cancel.remove();
     setActiveId(null);
     setTargetIdx(-1);
     clearDragStyles();
@@ -329,23 +325,7 @@ export function createReorderList(options: ReorderListOptions) {
 
   // ── Cancellation handlers ──────────────────────────────────────────────
 
-  function onEscape(e: KeyboardEvent) {
-    if (e.key === 'Escape') cancelDrag();
-  }
-  function onBlur() { cancelDrag(); }
-  function onContextMenu() { cancelDrag(); }
-
-  function addCancelListeners() {
-    document.addEventListener('keydown', onEscape);
-    document.addEventListener('contextmenu', onContextMenu);
-    window.addEventListener('blur', onBlur);
-  }
-
-  function removeCancelListeners() {
-    document.removeEventListener('keydown', onEscape);
-    document.removeEventListener('contextmenu', onContextMenu);
-    window.removeEventListener('blur', onBlur);
-  }
+  const cancel = createCancelListeners({ onCancel: cancelDrag });
 
   function clearDragStyles() {
     if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = 0; }
@@ -362,16 +342,6 @@ export function createReorderList(options: ReorderListOptions) {
       el.style.pointerEvents = '';
     }
     document.body.style.cursor = '';
-  }
-
-  /** Block the post-drag click. Document capture + once eats the click,
-   *  rAF safety net removes the handler if click never fires. */
-  function blockNextClick() {
-    const eatClick = (e: Event) => { e.stopPropagation(); e.preventDefault(); };
-    document.addEventListener('click', eatClick, { capture: true, once: true });
-    requestAnimationFrame(() => {
-      document.removeEventListener('click', eatClick, { capture: true });
-    });
   }
 
   // ── Pointer event wiring ───────────────────────────────────────────────
