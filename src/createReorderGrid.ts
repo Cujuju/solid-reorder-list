@@ -63,14 +63,21 @@ interface CachedGridRect {
 interface GridDragState {
   id: string;
   sourceIndex: number;
-  startPointer: { x: number; y: number };
+  /** Pointer position at activate, in VIEWPORT coords (clientX/Y).
+   *  Source-element transform reads this to translate the dragged item
+   *  by the viewport delta as the pointer moves. */
+  startPointerViewport: { x: number; y: number };
+  /** Scroll offset at activate. Combined with startPointerViewport
+   *  gives the activate-time content-frame anchor; combined with the
+   *  current scroll gives the current content-frame pointer. */
+  scrollAtActivate: { x: number; y: number };
   /** Original snapshot rects in container-content coords. Immutable
-   *  during drag. Filled by U3 (activate's snapshot pass). */
+   *  during drag. */
   rects: CachedGridRect[];
   /** Mutable mirror of `rects[]` used for hysteresis. Same coordinate
    *  frame. Mutated on each target change by U4. */
   effectiveRects: CachedGridRect[];
-  /** Inferred grid metrics — filled by U3. */
+  /** Inferred grid metrics. */
   cellWidth: number;
   cellHeight: number;
   gutterX: number;
@@ -135,29 +142,172 @@ export function createReorderGrid(options: ReorderGridOptions) {
 
   // ── Drag lifecycle ──────────────────────────────────────────────────────
 
+  /** Measure one element into a CachedGridRect in container-content
+   *  coords (clientLeft/Top + scrollContainer.scrollLeft/Top, mirror y).
+   *  When no scrollContainer is provided, falls back to window.scrollX/Y
+   *  so the no-container path resolves to true page coords. */
+  function measure(el: HTMLElement, scroll: { x: number; y: number }): CachedGridRect {
+    const r = el.getBoundingClientRect();
+    return {
+      contentLeft: r.left + scroll.x,
+      contentTop: r.top + scroll.y,
+      contentRight: r.right + scroll.x,
+      contentBottom: r.bottom + scroll.y,
+      width: r.width,
+      height: r.height,
+    };
+  }
+
+  /** Same-row predicate using cell-height-relative tolerance to
+   *  absorb sub-pixel jitter on HiDPI / fractional layouts. */
+  function sameRow(a: CachedGridRect, b: CachedGridRect, cellHeight: number): boolean {
+    return Math.abs(a.contentTop - b.contentTop) < cellHeight * 0.1;
+  }
+
+  /** Hit-test a content-frame pointer against the engine's
+   *  effectiveRects[]. First match wins (flat-order tie-break for
+   *  4-way corners). When no rect contains the point, returns the
+   *  cell whose centre minimises Euclidean distance from the point. */
+  function hitTest(point: { x: number; y: number }): number {
+    if (!drag) return -1;
+    const { effectiveRects, rects } = drag;
+    for (let i = 0; i < effectiveRects.length; i++) {
+      const r = effectiveRects[i];
+      if (
+        point.x >= r.contentLeft && point.x <= r.contentRight &&
+        point.y >= r.contentTop && point.y <= r.contentBottom
+      ) {
+        return i;
+      }
+    }
+    // Fallback — nearest by centre distance against the original
+    // (un-inflated) rects, since centres are stable under hysteresis.
+    let bestIdx = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      const cx = (r.contentLeft + r.contentRight) / 2;
+      const cy = (r.contentTop + r.contentBottom) / 2;
+      const d = Math.hypot(point.x - cx, point.y - cy);
+      if (d < bestD) { bestD = d; bestIdx = i; }
+    }
+    return bestIdx;
+  }
+
   /** Apply lift styling to the dragged element + neighbour transition
-   *  styles. Snapshot, hit-test, and displacement land in U3/U4. */
-  function activate(id: string, sourceIndex: number, ids: string[], startPointer: { x: number; y: number }) {
+   *  styles. Captures the snapshot, infers grid metrics, builds the
+   *  inflated effectiveRects[]. Displacement and commit logic land in U4. */
+  function activate(
+    id: string,
+    sourceIndex: number,
+    ids: string[],
+    startPointerViewport: { x: number; y: number },
+    scrollAtActivate: { x: number; y: number },
+  ) {
     // Prune stale entries — items removed since last drag.
     const idSet = new Set(ids);
     for (const key of nodes.keys()) {
       if (!idSet.has(key)) nodes.delete(key);
     }
 
-    // Snapshot pass and grid-metric inference are filled in U3.
-    // For U2 the drag state carries enough to flag isDragging + activeId
-    // without holding meaningful rects.
+    // Snapshot — measure all registered rects in container-content coords.
+    // Items missing from `nodes` (shouldn't happen in practice but defends
+    // against partial registration) get zero-rects so indices stay aligned.
+    const rects: CachedGridRect[] = ids.map((itemId) => {
+      const el = nodes.get(itemId);
+      return el
+        ? measure(el, scrollAtActivate)
+        : { contentLeft: 0, contentTop: 0, contentRight: 0, contentBottom: 0, width: 0, height: 0 };
+    });
+
+    // Cell-width / cell-height inference — first item's dimensions.
+    const cellWidth = rects[0]?.width ?? 0;
+    const cellHeight = rects[0]?.height ?? 0;
+
+    // Dev-mode-only non-uniform-cell diagnostic. Production builds pay no
+    // diagnostic cost; external adopters with mismatched cells get a
+    // console signal instead of silent wrong displacement.
+    // Skip zero-sized rects (unregistered-sentinel — see measure()'s
+    // fallback path) so partial registration during incremental mounts
+    // doesn't trip the warn.
+    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+      for (const r of rects) {
+        if (r.width === 0 && r.height === 0) continue;
+        if (
+          Math.abs(r.width - cellWidth) > cellHeight * 0.05 ||
+          Math.abs(r.height - cellHeight) > cellHeight * 0.05
+        ) {
+          console.warn(
+            '@cujuju/solid-reorder-list: createReorderGrid expects uniform cell sizes. ' +
+            'See README "Scope assumptions". Mismatched cell detected: ' +
+            `${r.width}x${r.height} vs expected ${cellWidth}x${cellHeight}.`,
+          );
+          break;
+        }
+      }
+    }
+
+    // Column count inference — count items in the first row by
+    // content-top, using a cell-height-relative tolerance.
+    let cols = 1;
+    while (cols < rects.length && sameRow(rects[0], rects[cols], cellHeight)) cols++;
+
+    // Defensive guard for degenerate cases — single-row when only one
+    // row of items exists. Engine continues without crashing rather
+    // than refuse to drag.
+    if (cols < 1 || cols > rects.length) cols = rects.length;
+
+    // Cross-validation invariant: row 1's content-top should be
+    // distinctly below row 0's (offset by ~cellHeight + gutterY). If
+    // sameRow reports they're on the same row at index `cols`, the
+    // tolerance was too loose for this layout — emit dev-mode warn so
+    // tight-row-spacing consumers see the signal instead of silent
+    // wrong displacement.
+    if (
+      typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production' &&
+      rects.length > cols && sameRow(rects[0], rects[cols], cellHeight)
+    ) {
+      console.warn(
+        '@cujuju/solid-reorder-list: createReorderGrid column-count inference ' +
+        'cross-validation failed. Inferred cols=' + cols + ' but row[0] and row[1] ' +
+        `appear in the same row by cellHeight*0.1 tolerance (cellHeight=${cellHeight}). ` +
+        'Likely cause: gutterY < cellHeight*0.1 (compact layout). ' +
+        'Engine continues with inferred cols, but displacement may be incorrect.',
+      );
+    }
+
+    // Gutter inference — defensive against degenerate layouts.
+    const gutterX = rects[1] && sameRow(rects[0], rects[1], cellHeight)
+      ? Math.max(0, rects[1].contentLeft - rects[0].contentRight)
+      : 0;
+    const gutterY = rects[cols]
+      ? Math.max(0, rects[cols].contentTop - rects[0].contentBottom)
+      : 0;
+
+    // Inflated effectiveRects[] — tessellate cells with no gaps so
+    // pointer-in-gutter has a deterministic target. Mutable copy lets
+    // U4 apply per-target hysteresis adjustments in place.
+    const effectiveRects: CachedGridRect[] = rects.map((r) => ({
+      contentLeft: r.contentLeft - gutterX / 2,
+      contentTop: r.contentTop - gutterY / 2,
+      contentRight: r.contentRight + gutterX / 2,
+      contentBottom: r.contentBottom + gutterY / 2,
+      width: r.width + gutterX,
+      height: r.height + gutterY,
+    }));
+
     drag = {
       id,
       sourceIndex,
-      startPointer,
-      rects: [],
-      effectiveRects: [],
-      cellWidth: 0,
-      cellHeight: 0,
-      gutterX: 0,
-      gutterY: 0,
-      cols: 0,
+      startPointerViewport,
+      scrollAtActivate,
+      rects,
+      effectiveRects,
+      cellWidth,
+      cellHeight,
+      gutterX,
+      gutterY,
+      cols,
       currentTarget: sourceIndex,
       ids,
     };
@@ -188,11 +338,47 @@ export function createReorderGrid(options: ReorderGridOptions) {
     cancel.add();
   }
 
-  /** Filled by U3 (hit-test against effectiveRects) + U4 (displacement). */
-  function updateDrag(_pointer: { x: number; y: number }) {
-    // Stub — U3/U4 fill this with the snapshot-aware hit-test +
-    // displacement loop. Currently a no-op so the activation pipeline
-    // tests can pass without exercising the snapshot path.
+  /** Per-pointermove tick. Two coordinate frames in play:
+   *  - Source-element transform uses VIEWPORT delta (clientX/Y delta
+   *    from `startPointerViewport`), so the dragged item stays glued
+   *    to the user's pointer regardless of mid-drag scroll.
+   *  - Hit-test uses the CONTENT-frame pointer (clientX + current
+   *    scroll), so it tests against the activate-time snapshot rects
+   *    that live in the same frame.
+   *
+   *  Displacement loop is filled by U4 — for U3, only the source
+   *  transform and the targetIdx update fire. */
+  function updateDrag(ev: PointerEvent) {
+    if (!drag) return;
+    const { startPointerViewport } = drag;
+    const dx = ev.clientX - startPointerViewport.x;
+    const dy = ev.clientY - startPointerViewport.y;
+
+    // Source-element transform — batched to one DOM write per frame.
+    const draggedEl = nodes.get(drag.ids[drag.sourceIndex]);
+    if (draggedEl) {
+      if (dragRaf) cancelAnimationFrame(dragRaf);
+      dragRaf = requestAnimationFrame(() => {
+        draggedEl.style.transform = `translate(${dx}px, ${dy}px) scale(${DRAG_SCALE})`;
+        dragRaf = 0;
+      });
+    }
+
+    // Hit-test in content frame against the activate-time snapshot rects.
+    // Manual scroll changes since activate are absorbed by re-reading
+    // the live scroll on every tick (R7).
+    const currentScroll = getScroll(getScrollContainer());
+    const pointerContent = {
+      x: ev.clientX + currentScroll.x,
+      y: ev.clientY + currentScroll.y,
+    };
+    const newTarget = hitTest(pointerContent);
+
+    if (newTarget !== drag.currentTarget) {
+      drag.currentTarget = newTarget;
+      setTargetIdx(newTarget);
+      // Displacement loop + hysteresis update live in U4.
+    }
   }
 
   /** Filled by U4. For U2, captures from/to and clears state without
@@ -279,18 +465,23 @@ export function createReorderGrid(options: ReorderGridOptions) {
         // threshold on either axis individually.
         if (Math.hypot(dx, dy) >= threshold) {
           activated = true;
-          // Snapshot scroll at activate-time so displacement deltas
-          // stay in container-content coords throughout the drag.
+          // Snapshot scroll at activate-time. startPointer is stored as
+          // viewport coords (for source-element transform deltas);
+          // scrollAtActivate carries the activate-time scroll separately
+          // so hit-test can compute content-frame pointer at any later
+          // time as `clientX + getScroll().x` (R7 live compensation).
           const scroll = getScroll(getScrollContainer());
-          activate(id, sourceIndex, ids, {
-            x: ev.clientX + scroll.x,
-            y: ev.clientY + scroll.y,
-          });
+          activate(
+            id,
+            sourceIndex,
+            ids,
+            { x: ev.clientX, y: ev.clientY },
+            { x: scroll.x, y: scroll.y },
+          );
         }
         return;
       }
-      const scroll = getScroll(getScrollContainer());
-      updateDrag({ x: ev.clientX + scroll.x, y: ev.clientY + scroll.y });
+      updateDrag(ev);
     };
 
     const onUp = (upEvent: PointerEvent) => {
