@@ -83,6 +83,18 @@ interface GridDragState {
   gutterX: number;
   gutterY: number;
   cols: number;
+  /** Bounding rect of the FULL `cols × rowCount` grid, including any
+   *  trailing empty cells where `rects.length` doesn't fill the last
+   *  row. In container-content coords. Used by hit-test to bound the
+   *  nearest-cell fallback — drops far outside this rect (plus
+   *  `OUTSIDE_GRID_MARGIN_FRACTION` slack) return `sourceIndex` so
+   *  `commitDrag` short-circuits via `from === to`. */
+  gridBoundsContent: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  };
   /** Last-resolved hit-test result. Consumed by commitDrag for the
    *  onReorder index. */
   currentTarget: number;
@@ -203,7 +215,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
    *  back-and-forth flipping on small ±X% pointer motion. */
   function hitTest(point: { x: number; y: number }): number {
     if (!drag) return -1;
-    const { effectiveRects, rects, currentTarget, sourceIndex, cellWidth, cellHeight } = drag;
+    const { effectiveRects, rects, currentTarget, sourceIndex, cellWidth, cellHeight, gridBoundsContent } = drag;
 
     // Pass 1: sticky-currentTarget extension.
     // Base is the INFLATED effectiveRect (consistent with Pass 2's
@@ -247,7 +259,23 @@ export function createReorderGrid(options: ReorderGridOptions) {
       }
     }
 
-    // Pass 3: nearest by centre distance against original rects.
+    // Pass 3: bounded nearest-cell fallback.
+    // If pointer is more than half-cell beyond the full grid's
+    // bounding rect, return sourceIndex — commitDrag's
+    // `from === to` short-circuit fires no-op onReorder, treating
+    // an off-grid drop as an implicit cancel. Otherwise (pointer in
+    // a gutter or on a trailing empty cell), nearest-by-centre.
+    const marginX = cellWidth * OUTSIDE_GRID_MARGIN_FRACTION;
+    const marginY = cellHeight * OUTSIDE_GRID_MARGIN_FRACTION;
+    if (
+      point.x < gridBoundsContent.left - marginX ||
+      point.x > gridBoundsContent.right + marginX ||
+      point.y < gridBoundsContent.top - marginY ||
+      point.y > gridBoundsContent.bottom + marginY
+    ) {
+      return sourceIndex;
+    }
+
     let bestIdx = 0;
     let bestD = Infinity;
     for (let i = 0; i < rects.length; i++) {
@@ -359,6 +387,21 @@ export function createReorderGrid(options: ReorderGridOptions) {
       height: r.height + gutterY,
     }));
 
+    // Grid-bounding-rect over the FULL `cols × rowCount` layout —
+    // includes trailing empty cells where rects.length doesn't fill
+    // the last row. A drop in such an empty cell still snaps to the
+    // nearest registered cell (intent: "drop at the end"); a drop
+    // outside this rect plus half-cell margin returns sourceIndex
+    // (intent: "off the grid → cancel").
+    const rowCount = Math.ceil(rects.length / cols);
+    const origin = rects[0] ?? { contentLeft: 0, contentTop: 0 };
+    const gridBoundsContent = {
+      left: origin.contentLeft,
+      top: origin.contentTop,
+      right: origin.contentLeft + cols * cellWidth + Math.max(0, cols - 1) * gutterX,
+      bottom: origin.contentTop + rowCount * cellHeight + Math.max(0, rowCount - 1) * gutterY,
+    };
+
     drag = {
       id,
       sourceIndex,
@@ -371,6 +414,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
       gutterX,
       gutterY,
       cols,
+      gridBoundsContent,
       currentTarget: sourceIndex,
       ids,
     };
@@ -411,6 +455,17 @@ export function createReorderGrid(options: ReorderGridOptions) {
   // boundary by 2*halfShift between transitions and pushed pointer
   // into the new target's biased zone).
   const HYSTERESIS_FRACTION = 0.5;
+
+  // Outside-grid drop margin — half-cell magnitude beyond the grid's
+  // bounding rect that still snaps to a nearest cell. Drops further
+  // outside return sourceIndex from hitTest, so commitDrag's
+  // `from === to` short-circuit produces a no-op (the user dropped
+  // unambiguously off the grid; treat as cancel without firing
+  // onReorder). Same fraction as HYSTERESIS_FRACTION — both measure
+  // half-cell dimensional slack, kept named separately so the meaning
+  // stays clear (one's a stickiness threshold, the other's an
+  // off-grid threshold).
+  const OUTSIDE_GRID_MARGIN_FRACTION = 0.5;
 
   /** Apply per-item flat-order displacement transforms when the target
    *  changes. Each item between sourceIndex and newTarget (inclusive

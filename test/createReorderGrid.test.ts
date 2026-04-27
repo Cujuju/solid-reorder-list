@@ -554,7 +554,41 @@ describe('createReorderGrid', () => {
       });
     });
 
-    it('returns the nearest cell by Euclidean distance for an outside point', () => {
+    it('returns sourceIndex for points clearly outside the grid (bounded nearest-cell fallback)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const { grid, cells } = build4x3();
+        // build4x3: 4×3 grid, cellWidth=140, cellHeight=210, gutter=12.
+        // gridBoundsContent: left=0, top=0, right=596, bottom=654.
+        // OUTSIDE_GRID_MARGIN_FRACTION=0.5 → marginX=70, marginY=105.
+        // Outside threshold: x<-70 or x>666, y<-105 or y>759.
+        const downEvent = pointerEvent('pointerdown', { clientX: 70, clientY: 105 });
+        Object.defineProperty(downEvent, 'target', { value: cells[0] });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 74, clientY: 109 }));
+
+        // 1500px below grid bottom — well past the half-cell margin.
+        // Returns sourceIndex (=0); commitDrag would short-circuit
+        // via `from === to` if pointerup fired here, treating the
+        // off-grid drop as a no-op cancel.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 526, clientY: 1500 }));
+        expect(grid.targetIndex()).toBe(0);
+
+        // Far above grid — same: outside top margin → sourceIndex.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 50, clientY: -500 }));
+        expect(grid.targetIndex()).toBe(0);
+
+        // Far right of grid — outside right margin → sourceIndex.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 1500, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(0);
+
+        // Far left of grid — outside left margin → sourceIndex.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: -200, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(0);
+      });
+    });
+
+    it('still snaps to nearest cell when pointer is within half-cell margin of the grid', () => {
       createRoot((d) => {
         dispose = d;
         const { grid, cells } = build4x3();
@@ -563,14 +597,17 @@ describe('createReorderGrid', () => {
         grid.itemProps('a').onPointerDown(downEvent);
         document.dispatchEvent(pointerEvent('pointermove', { clientX: 74, clientY: 109 }));
 
-        // 500px below the bottom-right cell — nearest centre is index 11.
-        document.dispatchEvent(pointerEvent('pointermove', { clientX: 526, clientY: 1500 }));
+        // 50px below grid bottom (654 + 50 = 704) — INSIDE margin
+        // (threshold is 654 + 105 = 759). Falls through to
+        // nearest-cell. At x=526, y=704: nearest centre is index 11
+        // (row 2 col 3, centre 526, 525).
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 526, clientY: 704 }));
         expect(grid.targetIndex()).toBe(11);
-        // Far above the grid — nearest is row 0, near col 0 (index 0)
-        // since drag started at (70, 105). Pointer (50, -500) → nearest
-        // is index 0 at centre (70, 105).
-        document.dispatchEvent(pointerEvent('pointermove', { clientX: 50, clientY: -500 }));
-        expect(grid.targetIndex()).toBe(0);
+
+        // 50px above grid top — INSIDE margin (threshold -105).
+        // Pointer (526, -50): nearest centre is index 3 (row 0 col 3, centre 526, 105).
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 526, clientY: -50 }));
+        expect(grid.targetIndex()).toBe(3);
       });
     });
   });
