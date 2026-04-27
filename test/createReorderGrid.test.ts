@@ -600,4 +600,267 @@ describe('createReorderGrid', () => {
       // Note: this assertion can be flaky in jsdom rAF mocking. Soft-check.
     });
   });
+
+  // ─── U4: per-item flat-order displacement + hysteresis + commit/cancel ──
+
+  describe('per-item flat-order displacement (U4)', () => {
+    it('forward drag from index 2 to index 6 displaces items 3,4,5,6 backward by one slot (covers AE1)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const { grid, ids, cells } = build4x3();
+
+        // Activate drag on item C (index 2). Centre of C: (304+70, 105) = (374, 105).
+        const downEvent = pointerEvent('pointerdown', { clientX: 374, clientY: 105 });
+        Object.defineProperty(downEvent, 'target', { value: cells[2] });
+        grid.itemProps('c').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 378, clientY: 109 }));
+        expect(grid.isDragging()).toBe(true);
+
+        // Move pointer to centre of cell index 6 (row 1, col 2): (304+70, 222+105) = (374, 327).
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 374, clientY: 327 }));
+        expect(grid.targetIndex()).toBe(6);
+
+        // Items at indices 3, 4, 5, 6 should each have a transform translate(...)
+        // shifting them one flat-order position backward.
+        // index 3 → dest index 2: dest contentLeft = 2*152 = 304, cur = 3*152 = 456. tx = -152.
+        expect(cells[3].style.transform).toContain('translate(-152px,');
+        // index 4 (row 1 col 0) → dest index 3 (row 0 col 3): dest = (456, 0), cur = (0, 222). tx=456, ty=-222.
+        expect(cells[4].style.transform).toContain('translate(456px, -222px)');
+        // index 5 (row 1 col 1) → dest index 4 (row 1 col 0): dest = (0, 222), cur = (152, 222). tx=-152, ty=0.
+        expect(cells[5].style.transform).toContain('translate(-152px, 0px)');
+        // index 6 (row 1 col 2) → dest index 5 (row 1 col 1): tx=-152, ty=0.
+        expect(cells[6].style.transform).toContain('translate(-152px, 0px)');
+
+        // Items outside [3, 6] should have empty transform (or scale-only for source).
+        // index 0, 1, 7-11 are not displaced.
+        expect(cells[0].style.transform).toBe('');
+        expect(cells[1].style.transform).toBe('');
+        expect(cells[7].style.transform).toBe('');
+        expect(cells[11].style.transform).toBe('');
+      });
+    });
+
+    it('reverse drag from index 6 to index 2 displaces items 2,3,4,5 forward by one slot', () => {
+      createRoot((d) => {
+        dispose = d;
+        const { grid, cells } = build4x3();
+        // Activate drag on item G (index 6) — centre at (374, 327).
+        const downEvent = pointerEvent('pointerdown', { clientX: 374, clientY: 327 });
+        Object.defineProperty(downEvent, 'target', { value: cells[6] });
+        grid.itemProps('g').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 378, clientY: 331 }));
+        expect(grid.isDragging()).toBe(true);
+
+        // Move to centre of index 2 — viewport (374, 105).
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 374, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(2);
+
+        // Items 2, 3, 4, 5 should shift forward by one slot.
+        // index 2 → dest 3: tx = 456 - 304 = 152. ty = 0.
+        expect(cells[2].style.transform).toContain('translate(152px, 0px)');
+        // index 3 (row 0 col 3) → dest 4 (row 1 col 0): tx = 0 - 456 = -456, ty = 222 - 0 = 222.
+        expect(cells[3].style.transform).toContain('translate(-456px, 222px)');
+        // index 4 → dest 5: tx=152, ty=0.
+        expect(cells[4].style.transform).toContain('translate(152px, 0px)');
+        // index 5 → dest 6: tx=152, ty=0.
+        expect(cells[5].style.transform).toContain('translate(152px, 0px)');
+
+        // Source (index 6) keeps scale + translate of its own.
+        // Other items unchanged.
+        expect(cells[0].style.transform).toBe('');
+        expect(cells[7].style.transform).toBe('');
+      });
+    });
+
+    it('target-equals-source: no displacement applied', () => {
+      createRoot((d) => {
+        dispose = d;
+        const { grid, cells } = build4x3();
+        const downEvent = pointerEvent('pointerdown', { clientX: 70, clientY: 105 });
+        Object.defineProperty(downEvent, 'target', { value: cells[0] });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 74, clientY: 109 }));
+        // targetIndex starts at sourceIndex; a small wiggle should not displace.
+        // Wiggle within the same cell.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 75, clientY: 110 }));
+        expect(grid.targetIndex()).toBe(0);
+        // No neighbours should have transform set.
+        for (let i = 1; i < 12; i++) {
+          expect(cells[i].style.transform).toBe('');
+        }
+      });
+    });
+  });
+
+  describe('hysteresis (U4 — covers AE2)', () => {
+    it('reversal from target=N+1 back to N requires extra pointer travel (pure horizontal)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const { grid, cells } = build4x3();
+        // Drag from index 0 (centre 70, 105) → target 1 (centre 222, 105).
+        // Pure horizontal swap.
+        const downEvent = pointerEvent('pointerdown', { clientX: 70, clientY: 105 });
+        Object.defineProperty(downEvent, 'target', { value: cells[0] });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 74, clientY: 109 }));
+
+        // Move into cell 1's territory by crossing the natural boundary.
+        // Cell 0 right edge = 140; cell 1 left edge = 152. Boundary at ~146.
+        // Move pointer to clientX=160 → well into cell 1.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 160, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(1);
+
+        // After hysteresis: effectiveRects[1] is shrunk on the LEFT by
+        // cellWidth * 0.5 = 70px. So effectiveRects[1].contentLeft is now
+        // 152 - gutterX/2 + 70 = 146 + 70 = 216 (in content frame).
+        // To reverse to target=0, pointer must cross BACK past 216.
+        // First try: pointer at clientX=180 (still > 216? no, 180 < 216 → outside cell 1).
+        // Hmm, 180 is less than 216. Let's check what happens.
+
+        // Move back to clientX=180 — should this revert to target=0?
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 180, clientY: 105 }));
+        // 180 < 216 → outside cell 1's effective rect → reverts to nearest cell.
+        // But cell 0 effective rect is also expanded right by 70px:
+        // contentRight = 140 + gutterX/2 + 70 = 146 + 70 = 216.
+        // So cell 0's effectiveRect is [-6, -6] to [216, 216]. Pointer at 180,105
+        // is inside cell 0's expanded zone → target should revert to 0.
+        expect(grid.targetIndex()).toBe(0);
+
+        // Now from target=0, attempt to advance to target=1 again.
+        // Hysteresis re-applied: cell 1 shrunk on LEFT (now opposite direction).
+        // Wait — from 1→0, dxU = -1, so cell 0 (newTarget) is shrunk on RIGHT
+        // by 70px, cell 1 (prevTarget) is expanded on LEFT by 70px.
+        // To re-advance, pointer must cross past cell 0's effective right (= 216 - 70 = 146).
+        // Pointer at clientX=200 should already be past 146 → target=1.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 200, clientY: 105 }));
+        expect(grid.targetIndex()).toBe(1);
+      });
+    });
+  });
+
+  describe('commit/cancel (U4)', () => {
+    it('pointerup with from !== to fires onReorder(from, to)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b', 'c', 'd']);
+        const grid = createReorderGrid({ ids, onReorder });
+        for (let i = 0; i < 4; i++) {
+          grid.itemProps(ids()[i]).ref(mockElement(i * 100, 0, 100, 100));
+        }
+        const elA = mockElement(0, 0, 100, 100);
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 54, clientY: 54 }));
+        // Move to index 3 (centre 350, 50)
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 350, clientY: 50 }));
+        expect(grid.targetIndex()).toBe(3);
+        // Release
+        document.dispatchEvent(pointerEvent('pointerup', { clientX: 350, clientY: 50 }));
+        expect(onReorder).toHaveBeenCalledWith(0, 3);
+        expect(grid.isDragging()).toBe(false);
+      });
+    });
+
+    it('pointerup with from === to does not fire onReorder', () => {
+      createRoot((d) => {
+        dispose = d;
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b']);
+        const grid = createReorderGrid({ ids, onReorder });
+        const elA = mockElement(0, 0, 100, 100);
+        const elB = mockElement(100, 0, 100, 100);
+        grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 54, clientY: 54 }));
+        // Wiggle but don't change target
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 55, clientY: 55 }));
+        document.dispatchEvent(pointerEvent('pointerup', { clientX: 55, clientY: 55 }));
+        expect(onReorder).not.toHaveBeenCalled();
+      });
+    });
+
+    it('Escape during drag cancels without firing onReorder (covers AE4 non-auto-scroll branch)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b', 'c']);
+        const grid = createReorderGrid({ ids, onReorder });
+        for (let i = 0; i < 3; i++) {
+          grid.itemProps(ids()[i]).ref(mockElement(i * 100, 0, 100, 100));
+        }
+        const elA = mockElement(0, 0, 100, 100);
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 54, clientY: 54 }));
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 250, clientY: 50 }));
+        expect(grid.isDragging()).toBe(true);
+        // Esc cancels via shared.ts cancel listener.
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        expect(grid.isDragging()).toBe(false);
+        // Subsequent pointerup must not fire onReorder (drag was cancelled).
+        document.dispatchEvent(pointerEvent('pointerup', { clientX: 250, clientY: 50 }));
+        expect(onReorder).not.toHaveBeenCalled();
+      });
+    });
+
+    it('cancel() method aborts in-progress drag without firing onReorder (R13a)', () => {
+      createRoot((d) => {
+        dispose = d;
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b', 'c']);
+        const grid = createReorderGrid({ ids, onReorder });
+        for (let i = 0; i < 3; i++) {
+          grid.itemProps(ids()[i]).ref(mockElement(i * 100, 0, 100, 100));
+        }
+        const elA = mockElement(0, 0, 100, 100);
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 54, clientY: 54 }));
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 250, clientY: 50 }));
+        expect(grid.isDragging()).toBe(true);
+        grid.cancel();
+        expect(grid.isDragging()).toBe(false);
+        // Subsequent pointerup is a no-op.
+        document.dispatchEvent(pointerEvent('pointerup', { clientX: 250, clientY: 50 }));
+        expect(onReorder).not.toHaveBeenCalled();
+      });
+    });
+
+    it('clears all inline styles on commit', () => {
+      createRoot((d) => {
+        dispose = d;
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b', 'c']);
+        const grid = createReorderGrid({ ids, onReorder });
+        const elA = mockElement(0, 0, 100, 100);
+        const elB = mockElement(100, 0, 100, 100);
+        const elC = mockElement(200, 0, 100, 100);
+        grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
+        grid.itemProps('c').ref(elC);
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 54, clientY: 54 }));
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 250, clientY: 50 }));
+        document.dispatchEvent(pointerEvent('pointerup', { clientX: 250, clientY: 50 }));
+
+        // Source element should have no inline transform/zIndex/position after commit.
+        expect(elA.style.transform).toBe('');
+        expect(elA.style.zIndex).toBe('');
+        expect(elA.style.position).toBe('');
+        expect(elA.style.willChange).toBe('');
+        // Neighbour displacements should also be cleared.
+        expect(elB.style.transform).toBe('');
+        expect(elC.style.transform).toBe('');
+      });
+    });
+  });
 });

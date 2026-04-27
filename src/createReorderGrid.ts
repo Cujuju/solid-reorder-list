@@ -338,16 +338,120 @@ export function createReorderGrid(options: ReorderGridOptions) {
     cancel.add();
   }
 
+  // Hysteresis fraction — how much of a cell's width/height the
+  // current target's boundary is biased on the side facing the
+  // previous target. 0.5 = half-cell. Mirrors 1-D's halfShift idiom
+  // (createReorderList.ts updateEffectivePositions) translated to
+  // 2-D rects with axis-magnitude-proportional bias.
+  const HYSTERESIS_FRACTION = 0.5;
+
+  /** Reset effectiveRects[] back to inflated rects (gutter/2 on all
+   *  sides), then apply axis-magnitude-proportional hysteresis to the
+   *  prev/new target pair. Called on every target change.
+   *
+   *  Pure horizontal swap (next is right of prev): bias is full
+   *  half-cell on the horizontal axis, zero on vertical.
+   *  Pure vertical: mirror.
+   *  Diagonal (row-wrap): both axes proportional to |unit-vector
+   *  components|, so the perceived reversal-travel scales with the
+   *  swap distance. */
+  function applyHysteresis(state: GridDragState, prevTarget: number, newTarget: number) {
+    const { rects, effectiveRects, cellWidth, cellHeight, gutterX, gutterY } = state;
+
+    // Reset all effectiveRects to inflated copies of rects[].
+    for (let i = 0; i < rects.length; i++) {
+      const r = rects[i];
+      const e = effectiveRects[i];
+      e.contentLeft = r.contentLeft - gutterX / 2;
+      e.contentTop = r.contentTop - gutterY / 2;
+      e.contentRight = r.contentRight + gutterX / 2;
+      e.contentBottom = r.contentBottom + gutterY / 2;
+      e.width = r.width + gutterX;
+      e.height = r.height + gutterY;
+    }
+
+    if (prevTarget === newTarget) return;
+
+    const prevR = rects[prevTarget];
+    const nextR = rects[newTarget];
+    if (!prevR || !nextR) return;
+
+    const cxPrev = (prevR.contentLeft + prevR.contentRight) / 2;
+    const cyPrev = (prevR.contentTop + prevR.contentBottom) / 2;
+    const cxNext = (nextR.contentLeft + nextR.contentRight) / 2;
+    const cyNext = (nextR.contentTop + nextR.contentBottom) / 2;
+    const dx = cxNext - cxPrev;
+    const dy = cyNext - cyPrev;
+    const mag = Math.hypot(dx, dy);
+    if (mag === 0) return;
+
+    const dxU = dx / mag;
+    const dyU = dy / mag;
+    const shrinkX = Math.abs(dxU) * cellWidth * HYSTERESIS_FRACTION;
+    const shrinkY = Math.abs(dyU) * cellHeight * HYSTERESIS_FRACTION;
+
+    const eNext = effectiveRects[newTarget];
+    const ePrev = effectiveRects[prevTarget];
+
+    // Shrink newTarget on the side facing prev (boundary between them
+    // shifts into newTarget's territory) so reversing requires extra
+    // pointer travel.
+    if (dxU > 0) eNext.contentLeft += shrinkX;
+    else if (dxU < 0) eNext.contentRight -= shrinkX;
+    if (dyU > 0) eNext.contentTop += shrinkY;
+    else if (dyU < 0) eNext.contentBottom -= shrinkY;
+
+    // Expand prevTarget toward newTarget — the boundary on the prev
+    // side stays put, and the source's "fallback zone" extends so the
+    // user can reverse without immediately re-triggering on prev's
+    // adjacent boundary.
+    if (dxU > 0) ePrev.contentRight += shrinkX;
+    else if (dxU < 0) ePrev.contentLeft -= shrinkX;
+    if (dyU > 0) ePrev.contentBottom += shrinkY;
+    else if (dyU < 0) ePrev.contentTop -= shrinkY;
+  }
+
+  /** Apply per-item flat-order displacement transforms when the target
+   *  changes. Each item between sourceIndex and newTarget (inclusive
+   *  on both ends, in flat-order sequence) translates to its
+   *  predecessor's (forward drag) or successor's (reverse drag)
+   *  snapshot position. Items outside this range get `transform: ''`.
+   *  Source-element transform is owned by `updateDrag` (rAF-batched). */
+  function applyDisplacement(state: GridDragState) {
+    const { rects, ids, sourceIndex, currentTarget } = state;
+    for (let i = 0; i < ids.length; i++) {
+      if (i === sourceIndex) continue;
+      const el = nodes.get(ids[i]);
+      if (!el) continue;
+
+      let destIdx = -1;
+      if (currentTarget > sourceIndex && i > sourceIndex && i <= currentTarget) {
+        // Forward drag: items shift backward by one flat-order slot.
+        destIdx = i - 1;
+      } else if (currentTarget < sourceIndex && i >= currentTarget && i < sourceIndex) {
+        // Reverse drag: items shift forward by one flat-order slot.
+        destIdx = i + 1;
+      }
+
+      if (destIdx === -1) {
+        el.style.transform = '';
+      } else {
+        const dest = rects[destIdx];
+        const cur = rects[i];
+        const tx = dest.contentLeft - cur.contentLeft;
+        const ty = dest.contentTop - cur.contentTop;
+        el.style.transform = `translate(${tx}px, ${ty}px)`;
+      }
+    }
+  }
+
   /** Per-pointermove tick. Two coordinate frames in play:
    *  - Source-element transform uses VIEWPORT delta (clientX/Y delta
    *    from `startPointerViewport`), so the dragged item stays glued
    *    to the user's pointer regardless of mid-drag scroll.
    *  - Hit-test uses the CONTENT-frame pointer (clientX + current
    *    scroll), so it tests against the activate-time snapshot rects
-   *    that live in the same frame.
-   *
-   *  Displacement loop is filled by U4 — for U3, only the source
-   *  transform and the targetIdx update fire. */
+   *    that live in the same frame. */
   function updateDrag(ev: PointerEvent) {
     if (!drag) return;
     const { startPointerViewport } = drag;
@@ -375,9 +479,11 @@ export function createReorderGrid(options: ReorderGridOptions) {
     const newTarget = hitTest(pointerContent);
 
     if (newTarget !== drag.currentTarget) {
+      const prevTarget = drag.currentTarget;
       drag.currentTarget = newTarget;
       setTargetIdx(newTarget);
-      // Displacement loop + hysteresis update live in U4.
+      applyHysteresis(drag, prevTarget, newTarget);
+      applyDisplacement(drag);
     }
   }
 
