@@ -420,6 +420,105 @@ After each swap, effective positions shift by half the dragged item's size, crea
 
 The primitive's internal signals (`activeId`, `targetIndex`) live in an isolated `createRoot` scope. This prevents a known issue where SolidJS's reactive graph cleanup can dispose signals owned by a parent scope during drag, killing the drag mid-flight. The isolated root is disposed automatically via `onCleanup` (inside a component) or manually via `dispose()` (outside a component).
 
+## Grid mode (`createReorderGrid`)
+
+For 2-D auto-flow grids — responsive `repeat(auto-fill, minmax(N, 1fr))` layouts where displacement crosses row-wrap diagonals — use the sibling primitive `createReorderGrid`. Same spread-`itemProps` shape as `createReorderList`, with snapshot-based hit-test instead of edge-overlap collision.
+
+```tsx
+import { createSignal, For } from 'solid-js';
+import { createReorderGrid } from '@cujuju/solid-reorder-list';
+import '@cujuju/solid-reorder-list/css';
+
+function PinnedGrid() {
+  const [items, setItems] = createSignal(['a', 'b', 'c', 'd', 'e', 'f']);
+  let panelRef: HTMLDivElement | undefined;
+
+  const grid = createReorderGrid({
+    ids: items,
+    onReorder(from, to) {
+      const next = [...items()];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      setItems(next);
+    },
+    scrollContainer: () => panelRef ?? null,
+  });
+
+  return (
+    <div ref={panelRef} style={{ 'overflow-y': 'auto', 'max-height': '80vh' }}>
+      <div style={{ display: 'grid', 'grid-template-columns': 'repeat(auto-fill, minmax(140px, 1fr))', gap: '12px' }}>
+        <For each={items()}>
+          {(item) => <div {...grid.itemProps(item)}>{item}</div>}
+        </For>
+      </div>
+    </div>
+  );
+}
+```
+
+### Options (`ReorderGridOptions`)
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `ids` | `() => string[]` | **required** | Reactive accessor returning the current flat (row-major) order of IDs. |
+| `onReorder` | `(from: number, to: number) => void` | **required** | Called on drop with original and target indices. Not called when `from === to`. |
+| `activateDistance` | `number` | `5` | Pixels of pointer movement (Euclidean `Math.hypot(dx, dy)`) before drag activates. |
+| `transitionMs` | `number` | `200` | CSS transition duration on displaced items. |
+| `activeClass` | `string` | `'reorder-active'` | CSS class added to the dragged item. |
+| `dragScale` | `number` | `0.97` | Scale factor for the dragged item's lift. |
+| `stopPropagation` | `boolean` | `true` | Whether to call `e.stopPropagation()` on pointerdown. |
+| `skipSelector` | `string` | `DEFAULT_SKIP_SELECTOR` | CSS selector matched via `closest()` from the pointerdown target. When matched, drag activation is skipped. |
+| `scrollContainer` | `() => HTMLElement \| Window \| null` | — | Reactive accessor returning the scroll container. Snapshot rects are stored in container-content coords (`clientX + container.scrollLeft`); manual scrolls during drag are compensated on each `pointermove`. |
+
+### Public return shape
+
+Mirrors `createReorderList` plus `cancel()`:
+
+```ts
+{
+  itemProps(id: string): { ref, onPointerDown, classList, 'data-reorder-id' };
+  isActive(id: string): boolean;
+  isDragging(): boolean;
+  activeId(): string | null;
+  targetIndex(): number;        // -1 when not dragging
+  cancel(): void;               // abort in-progress drag without firing onReorder; idempotent
+  dispose(): void;
+}
+```
+
+### Coordinate frame
+
+`createReorderGrid` operates in **container-content coords** = `clientX + scrollContainer.scrollLeft` (mirror y). When `scrollContainer` is omitted (or returns `null`), it falls back to `window.scrollX/Y` and the frame becomes true page coords.
+
+This is **not** `pageX/pageY` directly. For Portal'd panels with `position: fixed`, window scroll does not compose into the frame — the container's scroll offset is the only meaningful frame.
+
+### Scope assumptions (read before adopting)
+
+- **Uniform cell width and height.** Auto-fill grids with `minmax(140px, 1fr)` qualify; masonry, mixed-size cards, or stretchy items don't. Dev-mode emits `console.warn` when cells differ in size beyond `cellHeight × 0.05`.
+- **Non-dense flow.** `grid-auto-flow: dense` is out of scope.
+- **LTR direction.** RTL grids are not handled.
+- **Cell-height-relative tolerance.** Same-row tolerance is `cellHeight × 0.1`. If your `gutterY < cellHeight × 0.1` (very compact layouts), column-count inference may misfire — dev-mode cross-validation invariant emits `console.warn` when violated.
+- **No `cols` option.** Column count is inferred from the snapshot.
+- **No mid-drag layout-change tracking.** If the window resizes, the panel resizes, the theme switches, or the scroll container's `clientWidth` otherwise changes during a drag, the snapshot becomes stale. Consumers can wire a `ResizeObserver` on the container that calls `gridReorder.cancel()` to invalidate the snapshot when this matters.
+- **No cross-instance concurrent drag protection.** Each `createReorderList` / `createReorderGrid` instance guards its own drag state; nothing prevents two instances activating simultaneously on multi-touch devices. Pre-existing in 1-D, inherited.
+- **No virtualised lists.** All registered items must be present in the DOM at activate.
+- **`touch-action` is the consumer's responsibility.** Apply `touch-action: none` to registered grid cells (matched via `[data-reorder-id]`) so Pointer Events drive the drag instead of the browser scrolling.
+
+### Auto-scroll deferred to v0.3.1
+
+v0.3.0 ships scroll-aware hit-test (R7 — manual scrolls during drag compensate correctly) but **no auto-scroll** when the pointer enters the container's edge zone. Auto-scroll is tracked as `R8`/`R9` and lands in v0.3.1 once a consumer demonstrates the panel routinely overflows AND users routinely drag to off-screen targets.
+
+### How it differs from `createReorderList`
+
+| Aspect | 1-D | 2-D grid |
+|---|---|---|
+| Collision model | Edge-overlap (40% forward, 70% reverse) | Inflated-rect tessellation, point-in-rect |
+| Activation threshold | `Math.abs(dx)` on the chosen axis | `Math.hypot(dx, dy)` Euclidean |
+| Anti-jitter | Per-displaced-cell halfShift on `effectiveStarts` | Per-target-pair half-cell on `effectiveRects[prev/next]` |
+| Hit-test | Walk forward/backward overlap counts | Tessellation lookup with nearest-cell fallback |
+| Coordinate frame | Viewport (no scroll compensation) | Container-content (R7 manual scroll compensation) |
+| Public surface | Standard | Standard + `cancel()` (R13a) |
+
 ## Compatibility
 
 - **SolidJS** >= 1.8.0
@@ -432,17 +531,18 @@ The primitive's internal signals (`activeId`, `targetIndex`) live in an isolated
 The package exports full type declarations. Key exports:
 
 ```ts
-import { createReorderList } from '@cujuju/solid-reorder-list';
-import type { ReorderListOptions } from '@cujuju/solid-reorder-list';
+import { createReorderList, createReorderGrid } from '@cujuju/solid-reorder-list';
+import type { ReorderListOptions, ReorderGridOptions } from '@cujuju/solid-reorder-list';
 ```
 
 For typing a prop that receives the return value:
 
 ```ts
-import { createReorderList } from '@cujuju/solid-reorder-list';
+import { createReorderList, createReorderGrid } from '@cujuju/solid-reorder-list';
 
 interface MyProps {
   reorder: ReturnType<typeof createReorderList>;
+  grid: ReturnType<typeof createReorderGrid>;
 }
 ```
 

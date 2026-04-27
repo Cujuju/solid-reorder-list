@@ -91,6 +91,16 @@ interface GridDragState {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/** Dev-mode probe — reads `process.env.NODE_ENV` defensively so the
+ *  primitive doesn't require @types/node and works in browser-only
+ *  bundles where `process` is undefined. Production builds have this
+ *  evaluate to `false` (after bundler dead-code elimination), so the
+ *  diagnostic warns add zero runtime cost. */
+function isDevMode(): boolean {
+  const proc = (globalThis as { process?: { env?: { NODE_ENV?: string } } }).process;
+  return proc?.env?.NODE_ENV !== 'production';
+}
+
 /** Read the scroll container's offset. Window vs Element API quirks
  *  are isolated here; v0.3.1's auto-scroll loop reuses the same helper. */
 function getScroll(c: HTMLElement | Window | null | undefined): { x: number; y: number } {
@@ -230,7 +240,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
     // Skip zero-sized rects (unregistered-sentinel — see measure()'s
     // fallback path) so partial registration during incremental mounts
     // doesn't trip the warn.
-    if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+    if (isDevMode()) {
       for (const r of rects) {
         if (r.width === 0 && r.height === 0) continue;
         if (
@@ -263,10 +273,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
     // tolerance was too loose for this layout — emit dev-mode warn so
     // tight-row-spacing consumers see the signal instead of silent
     // wrong displacement.
-    if (
-      typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production' &&
-      rects.length > cols && sameRow(rects[0], rects[cols], cellHeight)
-    ) {
+    if (isDevMode() && rects.length > cols && sameRow(rects[0], rects[cols], cellHeight)) {
       console.warn(
         '@cujuju/solid-reorder-list: createReorderGrid column-count inference ' +
         'cross-validation failed. Inferred cols=' + cols + ' but row[0] and row[1] ' +
