@@ -99,6 +99,13 @@ interface GridDragState {
    *  onReorder index. */
   currentTarget: number;
   ids: string[];
+  /** Placeholder DOM node inserted at source's grid track when the
+   *  source switches to `position: fixed` during drag. Preserves the
+   *  source's grid layout slot so neighbour cells don't reflow into
+   *  it (which would compound with the displacement transforms).
+   *  Removed in clearDragStyles() on commit/cancel. Null when the
+   *  source's parent could not be determined at activate. */
+  placeholder: HTMLDivElement | null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -402,6 +409,34 @@ export function createReorderGrid(options: ReorderGridOptions) {
       bottom: origin.contentTop + rowCount * cellHeight + Math.max(0, rowCount - 1) * gutterY,
     };
 
+    // Capture the source element's VIEWPORT rect (clientX/Y, not
+    // content-frame). Used to position the source via `position: fixed`
+    // so its translated visual escapes the consumer's scrollContainer
+    // overflow clip. Captured BEFORE the style application loop below
+    // so the rect is still natural (no scale(0.97) in effect yet).
+    const sourceEl = nodes.get(id);
+    const sourceVpRect = sourceEl
+      ? sourceEl.getBoundingClientRect()
+      : { left: 0, top: 0, width: 0, height: 0 } as DOMRect;
+
+    // Insert a placeholder at the source's grid track to preserve the
+    // layout slot when the source goes out of flow via `position: fixed`.
+    // Without this, a CSS Grid (or flex) layout reflows the remaining
+    // items to fill the source's track, compounding with the displacement
+    // transforms applied to in-flow neighbours and producing double-shift
+    // visual glitches. Placeholder is invisible, non-interactive, and
+    // sized to source's snapshot dimensions.
+    let placeholder: HTMLDivElement | null = null;
+    if (sourceEl && sourceEl.parentElement) {
+      placeholder = document.createElement('div');
+      placeholder.style.width = `${sourceVpRect.width}px`;
+      placeholder.style.height = `${sourceVpRect.height}px`;
+      placeholder.style.visibility = 'hidden';
+      placeholder.style.pointerEvents = 'none';
+      placeholder.setAttribute('data-reorder-placeholder', '');
+      sourceEl.parentElement.insertBefore(placeholder, sourceEl);
+    }
+
     drag = {
       id,
       sourceIndex,
@@ -417,13 +452,14 @@ export function createReorderGrid(options: ReorderGridOptions) {
       gridBoundsContent,
       currentTarget: sourceIndex,
       ids,
+      placeholder,
     };
 
     setActiveId(id);
     setTargetIdx(sourceIndex);
 
     // Style: dragged item gets instant scale lift; all others get a
-    // smooth transition for displacement animation (U4).
+    // smooth transition for displacement animation.
     const ms = getTransitionMs();
     for (const itemId of ids) {
       const el = nodes.get(itemId);
@@ -432,7 +468,21 @@ export function createReorderGrid(options: ReorderGridOptions) {
         el.style.willChange = 'transform';
         el.style.transition = 'none';
         el.style.zIndex = '50';
-        el.style.position = 'relative';
+        // `position: fixed` removes the source from its parent's flow
+        // and binds its containing block to the viewport. This escapes
+        // ancestor `overflow: auto / hidden / clip` boundaries — without
+        // this, a transform-translated source on an in-flow element gets
+        // visually clipped at the nearest scroll container's edges.
+        // Combined with the placeholder (above), the layout slot stays
+        // intact while the source visually follows the pointer freely.
+        // top/left anchor source at its activate-time viewport position;
+        // updateDrag's `transform: translate(dx, dy)` then offsets from
+        // that anchor by the pointer's viewport delta.
+        el.style.position = 'fixed';
+        el.style.top = `${sourceVpRect.top}px`;
+        el.style.left = `${sourceVpRect.left}px`;
+        el.style.width = `${sourceVpRect.width}px`;
+        el.style.height = `${sourceVpRect.height}px`;
         el.style.transform = `scale(${DRAG_SCALE})`;
       } else {
         el.style.willChange = 'transform';
@@ -579,6 +629,14 @@ export function createReorderGrid(options: ReorderGridOptions) {
   function clearDragStyles() {
     if (dragRaf) { cancelAnimationFrame(dragRaf); dragRaf = 0; }
 
+    // Remove the source's grid-track placeholder before resetting source
+    // styles. Order matters: with the placeholder still in place, the
+    // source returning to `position: relative` would briefly co-occupy
+    // the same track, causing a 1-frame layout glitch.
+    if (drag?.placeholder && drag.placeholder.parentElement) {
+      drag.placeholder.parentElement.removeChild(drag.placeholder);
+    }
+
     const targets = drag?.ids
       ? drag.ids.map((id) => nodes.get(id)).filter((el): el is HTMLElement => !!el)
       : [...nodes.values()];
@@ -587,6 +645,10 @@ export function createReorderGrid(options: ReorderGridOptions) {
       el.style.transition = '';
       el.style.zIndex = '';
       el.style.position = '';
+      el.style.top = '';
+      el.style.left = '';
+      el.style.width = '';
+      el.style.height = '';
       el.style.willChange = '';
       el.style.pointerEvents = '';
     }

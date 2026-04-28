@@ -318,13 +318,30 @@ describe('createReorderGrid', () => {
   });
 
   describe('lift styling on activate', () => {
-    it('applies position:relative, zIndex 50, and scale transform on activate', () => {
+    /** Build a parented mock element that has a real getBoundingClientRect
+     *  AND lives in a real DOM parent — needed for the placeholder pattern
+     *  that requires sourceEl.parentElement. */
+    function parentedMockElement(left: number, top: number, width: number, height: number, parent: HTMLElement): HTMLElement {
+      const el = document.createElement('div');
+      el.getBoundingClientRect = () => ({
+        left, top, right: left + width, bottom: top + height,
+        width, height, x: left, y: top, toJSON: () => {},
+      });
+      parent.appendChild(el);
+      return el;
+    }
+
+    it('applies position:fixed (escapes scrollContainer overflow), zIndex 50, and scale transform on activate', () => {
       createRoot((d) => {
         dispose = d;
+        const parent = document.createElement('div');
+        document.body.appendChild(parent);
         const [ids] = createSignal(['a', 'b']);
         const grid = createReorderGrid({ ids, onReorder: () => {} });
-        const elA = mockElement(0, 0, 100, 100);
+        const elA = parentedMockElement(0, 0, 100, 100, parent);
+        const elB = parentedMockElement(100, 0, 100, 100, parent);
         grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
 
         const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
         Object.defineProperty(downEvent, 'target', { value: elA });
@@ -332,25 +349,110 @@ describe('createReorderGrid', () => {
         document.dispatchEvent(pointerEvent('pointermove', { clientX: 56, clientY: 56 }));
 
         expect(grid.isDragging()).toBe(true);
-        expect(elA.style.position).toBe('relative');
+        // Source escapes ancestor stacking/overflow context via fixed.
+        expect(elA.style.position).toBe('fixed');
         expect(elA.style.zIndex).toBe('50');
         expect(elA.style.transform).toContain('scale(0.97)');
+        // Source anchored at its activate-time viewport rect.
+        expect(elA.style.top).toBe('0px');
+        expect(elA.style.left).toBe('0px');
+        expect(elA.style.width).toBe('100px');
+        expect(elA.style.height).toBe('100px');
+        // A placeholder sibling exists, sized to source's snapshot.
+        const placeholder = parent.querySelector('[data-reorder-placeholder]') as HTMLDivElement | null;
+        expect(placeholder).not.toBeNull();
+        expect(placeholder!.style.width).toBe('100px');
+        expect(placeholder!.style.height).toBe('100px');
+        expect(placeholder!.style.visibility).toBe('hidden');
+        expect(placeholder!.style.pointerEvents).toBe('none');
+        // Placeholder sits immediately before source, taking source's
+        // grid track in DOM order.
+        expect(placeholder!.nextElementSibling).toBe(elA);
+
+        document.body.removeChild(parent);
       });
     });
 
     it('respects custom dragScale', () => {
       createRoot((d) => {
         dispose = d;
+        const parent = document.createElement('div');
+        document.body.appendChild(parent);
         const [ids] = createSignal(['a', 'b']);
         const grid = createReorderGrid({ ids, onReorder: () => {}, dragScale: 1.0 });
-        const elA = mockElement(0, 0, 100, 100);
+        const elA = parentedMockElement(0, 0, 100, 100, parent);
+        const elB = parentedMockElement(100, 0, 100, 100, parent);
         grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
 
         const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
         Object.defineProperty(downEvent, 'target', { value: elA });
         grid.itemProps('a').onPointerDown(downEvent);
         document.dispatchEvent(pointerEvent('pointermove', { clientX: 56, clientY: 56 }));
         expect(elA.style.transform).toContain('scale(1)');
+        document.body.removeChild(parent);
+      });
+    });
+
+    it('removes placeholder + clears position/top/left/width/height on commit', () => {
+      createRoot((d) => {
+        dispose = d;
+        const parent = document.createElement('div');
+        document.body.appendChild(parent);
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b']);
+        const grid = createReorderGrid({ ids, onReorder });
+        const elA = parentedMockElement(0, 0, 100, 100, parent);
+        const elB = parentedMockElement(100, 0, 100, 100, parent);
+        grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
+
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 56, clientY: 56 }));
+        // Confirm placeholder exists mid-drag.
+        expect(parent.querySelector('[data-reorder-placeholder]')).not.toBeNull();
+        // Move past cell B's centre so commitDrag fires onReorder.
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 150, clientY: 50 }));
+        document.dispatchEvent(pointerEvent('pointerup', { clientX: 150, clientY: 50 }));
+
+        // Post-commit: placeholder gone, source styles cleared.
+        expect(parent.querySelector('[data-reorder-placeholder]')).toBeNull();
+        expect(elA.style.position).toBe('');
+        expect(elA.style.top).toBe('');
+        expect(elA.style.left).toBe('');
+        expect(elA.style.width).toBe('');
+        expect(elA.style.height).toBe('');
+        expect(elA.style.transform).toBe('');
+        document.body.removeChild(parent);
+      });
+    });
+
+    it('removes placeholder on cancel via Esc', () => {
+      createRoot((d) => {
+        dispose = d;
+        const parent = document.createElement('div');
+        document.body.appendChild(parent);
+        const onReorder = vi.fn();
+        const [ids] = createSignal(['a', 'b']);
+        const grid = createReorderGrid({ ids, onReorder });
+        const elA = parentedMockElement(0, 0, 100, 100, parent);
+        const elB = parentedMockElement(100, 0, 100, 100, parent);
+        grid.itemProps('a').ref(elA);
+        grid.itemProps('b').ref(elB);
+
+        const downEvent = pointerEvent('pointerdown', { clientX: 50, clientY: 50 });
+        Object.defineProperty(downEvent, 'target', { value: elA });
+        grid.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientX: 56, clientY: 56 }));
+        expect(parent.querySelector('[data-reorder-placeholder]')).not.toBeNull();
+        // Esc cancels via shared.ts cancel listener.
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+        expect(parent.querySelector('[data-reorder-placeholder]')).toBeNull();
+        expect(elA.style.position).toBe('');
+        expect(onReorder).not.toHaveBeenCalled();
+        document.body.removeChild(parent);
       });
     });
   });

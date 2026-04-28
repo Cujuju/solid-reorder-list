@@ -1,6 +1,6 @@
 {
   "name": "@cujuju/solid-reorder-list",
-  "version": "0.3.0-rc.3",
+  "version": "0.3.0-rc.4",
   "description": "Drag-to-reorder primitives for SolidJS — single-axis or 2-D grid, variable-height items, edge-overlap collision.",
   "type": "module",
   "main": "./dist/index.cjs",
