@@ -8,11 +8,12 @@
 
 /**
  * Default selector for skipping drag activation when the pointerdown
- * target is a focusable interactive control. Exported so consumers can
- * compose, e.g.
+ * target is a focusable interactive control or a label forwarding to one.
+ * A native `<select>` opens on pointerdown, so a drag starting there
+ * steals the pick. Exported so consumers can compose, e.g.
  * `skipSelector: DEFAULT_SKIP_SELECTOR + ', [data-no-drag]'`.
  */
-export const DEFAULT_SKIP_SELECTOR = 'button, input, a, [role="button"]';
+export const DEFAULT_SKIP_SELECTOR = 'button, input, select, textarea, label, a, [role="button"], [contenteditable]';
 
 /**
  * Block the next document-level click after a drag commits.

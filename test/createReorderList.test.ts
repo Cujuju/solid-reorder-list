@@ -265,6 +265,26 @@ describe('createReorderList', () => {
       });
     });
 
+    it.each(['select', 'textarea', 'label'])('does not activate drag from a %s (default selector)', (tag) => {
+      createRoot((d) => {
+        dispose = d;
+        const [ids] = createSignal(['a', 'b']);
+        const reorder = createReorderList({ ids, onReorder: vi.fn(), activateDistance: 5 });
+
+        const elA = mockElement(0, 50);
+        reorder.itemProps('a').ref(elA);
+        const control = document.createElement(tag);
+        elA.appendChild(control);
+
+        const downEvent = pointerEvent('pointerdown', { clientY: 25 });
+        Object.defineProperty(downEvent, 'target', { value: control });
+        reorder.itemProps('a').onPointerDown(downEvent);
+        document.dispatchEvent(pointerEvent('pointermove', { clientY: 31 }));
+
+        expect(reorder.isDragging()).toBe(false);
+      });
+    });
+
     it('does not activate when item root has role=button (default selector)', () => {
       // Regression guard: the default skipSelector includes [role="button"],
       // so a draggable whose ROOT element has role="button" never starts
