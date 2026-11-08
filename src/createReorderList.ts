@@ -16,7 +16,10 @@
  */
 
 import { createSignal, createRoot, onCleanup, getOwner } from 'solid-js';
-import { DEFAULT_SKIP_SELECTOR, blockNextClick, createCancelListeners } from './shared';
+import {
+  DEFAULT_ARMED_CLASS, DEFAULT_SKIP_SELECTOR, DEFAULT_TOUCH_HOLD_TOLERANCE,
+  blockNextClick, createCancelListeners, startPressHold,
+} from './shared';
 
 export { DEFAULT_SKIP_SELECTOR };
 
@@ -49,6 +52,16 @@ export interface ReorderListOptions {
    *  Defaults to {@link DEFAULT_SKIP_SELECTOR}. Set to an empty string
    *  to disable the skip entirely. */
   skipSelector?: string;
+  /** Milliseconds a touch or pen press must be held before it can drag
+   *  (default: 0, no hold). Stops a finger flick from grabbing an item.
+   *  Moving more than `touchHoldTolerance` or lifting during the hold gives
+   *  the press up. A mouse never waits. */
+  touchHoldMs?: number;
+  /** Pixels a press may wander during the hold (default: 10). */
+  touchHoldTolerance?: number;
+  /** CSS class on an item whose hold has completed, until it is dragged or
+   *  let go (default: 'reorder-armed'). Use it to show the item is ready. */
+  armedClass?: string;
 }
 
 interface CachedRect {
@@ -83,6 +96,9 @@ export function createReorderList(options: ReorderListOptions) {
   const DRAG_SCALE = options.dragScale ?? 0.97;
   const getStopPropagation = () => options.stopPropagation ?? true;
   const getSkipSelector = () => options.skipSelector ?? DEFAULT_SKIP_SELECTOR;
+  const getTouchHoldMs = () => options.touchHoldMs ?? 0;
+  const getTouchHoldTolerance = () => options.touchHoldTolerance ?? DEFAULT_TOUCH_HOLD_TOLERANCE;
+  const getArmedClass = () => options.armedClass ?? DEFAULT_ARMED_CLASS;
 
   // Registered elements keyed by ID
   const nodes = new Map<string, HTMLElement>();
@@ -92,11 +108,12 @@ export function createReorderList(options: ReorderListOptions) {
   // when the parent component's reactive graph re-evaluates during a drag,
   // killing the active drag mid-flight.
   let disposeRoot: (() => void) | undefined;
-  const { activeId, setActiveId, targetIdx, setTargetIdx } = createRoot((dispose) => {
+  const { activeId, setActiveId, targetIdx, setTargetIdx, armedId, setArmedId } = createRoot((dispose) => {
     disposeRoot = dispose;
     const [activeId, setActiveId] = createSignal<string | null>(null);
     const [targetIdx, setTargetIdx] = createSignal<number>(-1);
-    return { activeId, setActiveId, targetIdx, setTargetIdx };
+    const [armedId, setArmedId] = createSignal<string | null>(null);
+    return { activeId, setActiveId, targetIdx, setTargetIdx, armedId, setArmedId };
   });
 
   // Stored so cancel handlers can clean up pointer listeners from onPointerDown
@@ -364,15 +381,30 @@ export function createReorderList(options: ReorderListOptions) {
     const sourceIndex = ids.indexOf(id);
     if (sourceIndex === -1) return;
 
+    // A new press replaces one still waiting (e.g. a second finger during a hold).
+    if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
+
     const start = ptr(e);
     const threshold = getActivateDistance();
     let activated = false;
+    const hold = startPressHold(e, {
+      ms: getTouchHoldMs(),
+      tolerance: getTouchHoldTolerance(),
+      onHeld: () => setArmedId(id),
+    });
+
+    const release = () => { if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; } };
 
     const onMove = (ev: PointerEvent) => {
       if (!activated) {
+        if (!hold.held) {
+          if (!hold.move(ev)) release();
+          return;
+        }
         const distance = Math.abs(ptr(ev) - start);
         if (distance >= threshold) {
           activated = true;
+          setArmedId(null);
           activate(id, sourceIndex, ids, ptr(ev));
         }
         return;
@@ -382,15 +414,25 @@ export function createReorderList(options: ReorderListOptions) {
 
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.button !== 0) return;
-      if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
+      release();
       if (activated) commitDrag();
+    };
+
+    // The browser took the pointer (e.g. to scroll): drop the press and any drag.
+    const onPointerCancel = () => {
+      release();
+      if (activated) cancelDrag();
     };
 
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onPointerCancel);
     pointerCleanup = () => {
+      hold.stop();
+      setArmedId(null);
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onPointerCancel);
     };
   }
 
@@ -403,6 +445,7 @@ export function createReorderList(options: ReorderListOptions) {
   if (getOwner()) {
     onCleanup(() => {
       if (drag) cancelDrag();
+      if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
       nodes.clear();
       disposeRoot?.();
     });
@@ -415,7 +458,7 @@ export function createReorderList(options: ReorderListOptions) {
     itemProps: (id: string) => ({
       ref: (el: HTMLElement) => { nodes.set(id, el); },
       onPointerDown: (e: PointerEvent) => onPointerDown(id, e),
-      classList: { [getActiveClass()]: activeId() === id },
+      classList: { [getActiveClass()]: activeId() === id, [getArmedClass()]: armedId() === id },
       'data-reorder-id': id,
     }),
 
@@ -431,10 +474,14 @@ export function createReorderList(options: ReorderListOptions) {
     /** The current drop target index, or -1 if not dragging */
     targetIndex: targetIdx,
 
+    /** The ID of the item whose touch hold has completed, or null */
+    armedId,
+
     /** Manually dispose the isolated reactive root. Call this if you created
      *  the primitive outside a SolidJS owner scope and need deterministic cleanup. */
     dispose: () => {
       if (drag) cancelDrag();
+      if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
       nodes.clear();
       disposeRoot?.();
     },

@@ -67,3 +67,54 @@ export function createCancelListeners(opts: { onCancel: () => void }): CancelLis
     },
   };
 }
+
+/** Default pixels a held touch may wander before the hold is abandoned. */
+export const DEFAULT_TOUCH_HOLD_TOLERANCE = 10;
+/** Default class on an item whose touch hold has completed. */
+export const DEFAULT_ARMED_CLASS = 'reorder-armed';
+
+export interface PressHold {
+  /** True once the press may start a drag: at once for a mouse, after the hold for touch and pen. */
+  readonly held: boolean;
+  /** Feed each pointermove before activation. Returns false when the press
+   *  wandered too far during the hold, and the caller should give it up. */
+  move(ev: PointerEvent): boolean;
+  /** Clear the timer and listeners. Safe to call more than once. */
+  stop(): void;
+}
+
+/**
+ * Gate a press behind a hold. A touch or pen press must stay down, within
+ * `tolerance` pixels of where it started, for `ms` before it may drag, so a
+ * finger flick across a list scrolls or does nothing instead of grabbing an
+ * item. A mouse is never held. `ms <= 0` turns the hold off.
+ *
+ * While a touch press is down, its contextmenu (the long-press menu) is
+ * swallowed so it neither opens nor cancels the drag that follows.
+ */
+export function startPressHold(e: PointerEvent, opts: {
+  ms: number;
+  tolerance: number;
+  onHeld: () => void;
+}): PressHold {
+  const touch = e.pointerType === 'touch' || e.pointerType === 'pen';
+  if (opts.ms <= 0 || !touch) {
+    return { held: true, move: () => true, stop: () => {} };
+  }
+  const startX = e.clientX;
+  const startY = e.clientY;
+  let held = false;
+  const swallowMenu = (ev: Event) => { ev.preventDefault(); ev.stopPropagation(); };
+  const timer = setTimeout(() => { held = true; opts.onHeld(); }, opts.ms);
+  document.addEventListener('contextmenu', swallowMenu, { capture: true });
+  return {
+    get held() { return held; },
+    move(ev) {
+      return held || Math.hypot(ev.clientX - startX, ev.clientY - startY) <= opts.tolerance;
+    },
+    stop() {
+      clearTimeout(timer);
+      document.removeEventListener('contextmenu', swallowMenu, { capture: true });
+    },
+  };
+}

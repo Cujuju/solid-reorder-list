@@ -15,7 +15,9 @@
  */
 
 import { createSignal, createRoot, onCleanup, getOwner } from 'solid-js';
-import { DEFAULT_SKIP_SELECTOR, blockNextClick, createCancelListeners } from './shared';
+import {
+  DEFAULT_ARMED_CLASS, DEFAULT_SKIP_SELECTOR, DEFAULT_TOUCH_HOLD_TOLERANCE, blockNextClick, createCancelListeners, startPressHold,
+} from './shared';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -48,6 +50,16 @@ export interface ReorderGridOptions {
    *  HTMLElement and Window targets. v0.3.1 adds auto-scroll inside
    *  edge zones of this container. */
   scrollContainer?: () => HTMLElement | Window | null | undefined;
+  /** Milliseconds a touch or pen press must be held before it can drag.
+   *  Default 0 (no hold). Stops a finger flick from grabbing an item.
+   *  Moving more than `touchHoldTolerance` or lifting during the hold
+   *  gives the press up. A mouse never waits. */
+  touchHoldMs?: number;
+  /** Pixels a press may wander during the hold. Default 10. */
+  touchHoldTolerance?: number;
+  /** CSS class on an item whose hold has completed, until it is dragged
+   *  or let go. Default 'reorder-armed'. */
+  armedClass?: string;
 }
 
 interface CachedGridRect {
@@ -143,6 +155,9 @@ export function createReorderGrid(options: ReorderGridOptions) {
   const getStopPropagation = () => options.stopPropagation ?? true;
   const getSkipSelector = () => options.skipSelector ?? DEFAULT_SKIP_SELECTOR;
   const getScrollContainer = () => options.scrollContainer?.() ?? null;
+  const getTouchHoldMs = () => options.touchHoldMs ?? 0;
+  const getTouchHoldTolerance = () => options.touchHoldTolerance ?? DEFAULT_TOUCH_HOLD_TOLERANCE;
+  const getArmedClass = () => options.armedClass ?? DEFAULT_ARMED_CLASS;
 
   // Registered elements keyed by ID.
   const nodes = new Map<string, HTMLElement>();
@@ -152,11 +167,12 @@ export function createReorderGrid(options: ReorderGridOptions) {
   // when the parent component's reactive graph re-evaluates during a drag,
   // killing the active drag mid-flight.
   let disposeRoot: (() => void) | undefined;
-  const { activeId, setActiveId, targetIdx, setTargetIdx } = createRoot((dispose) => {
+  const { activeId, setActiveId, targetIdx, setTargetIdx, armedId, setArmedId } = createRoot((dispose) => {
     disposeRoot = dispose;
     const [activeId, setActiveId] = createSignal<string | null>(null);
     const [targetIdx, setTargetIdx] = createSignal<number>(-1);
-    return { activeId, setActiveId, targetIdx, setTargetIdx };
+    const [armedId, setArmedId] = createSignal<string | null>(null);
+    return { activeId, setActiveId, targetIdx, setTargetIdx, armedId, setArmedId };
   });
 
   // Stored so cancel handlers can clean up pointer listeners.
@@ -673,13 +689,27 @@ export function createReorderGrid(options: ReorderGridOptions) {
     const sourceIndex = ids.indexOf(id);
     if (sourceIndex === -1) return;
 
+    // A new press replaces one still waiting (e.g. a second finger during a hold).
+    if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
+
     const startX = e.clientX;
     const startY = e.clientY;
     const threshold = getActivateDistance();
     let activated = false;
+    const hold = startPressHold(e, {
+      ms: getTouchHoldMs(),
+      tolerance: getTouchHoldTolerance(),
+      onHeld: () => setArmedId(id),
+    });
+
+    const release = () => { if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; } };
 
     const onMove = (ev: PointerEvent) => {
       if (!activated) {
+        if (!hold.held) {
+          if (!hold.move(ev)) release();
+          return;
+        }
         const dx = ev.clientX - startX;
         const dy = ev.clientY - startY;
         // Euclidean activation threshold (R2). 1-D's `Math.abs` becomes
@@ -687,6 +717,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
         // threshold on either axis individually.
         if (Math.hypot(dx, dy) >= threshold) {
           activated = true;
+          setArmedId(null);
           // Snapshot scroll at activate-time. startPointer is stored as
           // viewport coords (for source-element transform deltas);
           // scrollAtActivate carries the activate-time scroll separately
@@ -708,15 +739,25 @@ export function createReorderGrid(options: ReorderGridOptions) {
 
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.button !== 0) return;
-      if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
+      release();
       if (activated) commitDrag();
+    };
+
+    // The browser took the pointer (e.g. to scroll): drop the press and any drag.
+    const onPointerCancel = () => {
+      release();
+      if (activated) cancelDrag();
     };
 
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onPointerCancel);
     pointerCleanup = () => {
+      hold.stop();
+      setArmedId(null);
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onPointerCancel);
     };
   }
 
@@ -728,6 +769,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
   if (getOwner()) {
     onCleanup(() => {
       if (drag) cancelDrag();
+      if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
       nodes.clear();
       disposeRoot?.();
     });
@@ -740,7 +782,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
     itemProps: (id: string) => ({
       ref: (el: HTMLElement) => { nodes.set(id, el); },
       onPointerDown: (e: PointerEvent) => onPointerDown(id, e),
-      classList: { [getActiveClass()]: activeId() === id },
+      classList: { [getActiveClass()]: activeId() === id, [getArmedClass()]: armedId() === id },
       'data-reorder-id': id,
     }),
 
@@ -755,6 +797,9 @@ export function createReorderGrid(options: ReorderGridOptions) {
 
     /** The current drop target index, or -1 if not dragging. */
     targetIndex: targetIdx,
+
+    /** The ID of the item whose touch hold has completed, or null. */
+    armedId,
 
     /** Abort an in-progress drag without firing onReorder.
      *  Idempotent no-op when no drag is active. (R13a)
@@ -771,6 +816,7 @@ export function createReorderGrid(options: ReorderGridOptions) {
      *  deterministic cleanup. */
     dispose: () => {
       if (drag) cancelDrag();
+      if (pointerCleanup) { pointerCleanup(); pointerCleanup = null; }
       nodes.clear();
       disposeRoot?.();
     },
