@@ -148,8 +148,21 @@ for (const [name, create] of Object.entries(engines)) {
       up(31, 'mouse');
     });
 
-    it('touch drags at once when touchHoldMs is not set', () => {
+    it('holds a touch for 200ms by default', () => {
       const { reorder, press } = setup({});
+      press();
+      vi.advanceTimersByTime(199);
+      move(31);
+      expect(reorder.isDragging()).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(reorder.armedId()).toBe('a');
+      move(31);
+      expect(reorder.isDragging()).toBe(true);
+      up(31);
+    });
+
+    it('touch drags at once when touchHoldMs is 0', () => {
+      const { reorder, press } = setup({ touchHoldMs: 0 });
       press();
       move(31);
       expect(reorder.isDragging()).toBe(true);

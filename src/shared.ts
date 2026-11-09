@@ -68,6 +68,8 @@ export function createCancelListeners(opts: { onCancel: () => void }): CancelLis
   };
 }
 
+/** Default milliseconds a touch or pen press is held before it can drag. */
+export const DEFAULT_TOUCH_HOLD_MS = 200;
 /** Default pixels a held touch may wander before the hold is abandoned. */
 export const DEFAULT_TOUCH_HOLD_TOLERANCE = 10;
 /** Default class on an item whose touch hold has completed. */

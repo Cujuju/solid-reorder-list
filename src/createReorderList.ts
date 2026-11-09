@@ -17,7 +17,7 @@
 
 import { createSignal, createRoot, onCleanup, getOwner } from 'solid-js';
 import {
-  DEFAULT_ARMED_CLASS, DEFAULT_SKIP_SELECTOR, DEFAULT_TOUCH_HOLD_TOLERANCE,
+  DEFAULT_ARMED_CLASS, DEFAULT_SKIP_SELECTOR, DEFAULT_TOUCH_HOLD_MS, DEFAULT_TOUCH_HOLD_TOLERANCE,
   blockNextClick, createCancelListeners, startPressHold,
 } from './shared';
 
@@ -53,9 +53,9 @@ export interface ReorderListOptions {
    *  to disable the skip entirely. */
   skipSelector?: string;
   /** Milliseconds a touch or pen press must be held before it can drag
-   *  (default: 0, no hold). Stops a finger flick from grabbing an item.
-   *  Moving more than `touchHoldTolerance` or lifting during the hold gives
-   *  the press up. A mouse never waits. */
+   *  (default: 200). Stops a finger flick from grabbing an item. Moving more
+   *  than `touchHoldTolerance` or lifting during the hold gives the press up.
+   *  A mouse never waits. Set to 0 to turn the hold off. */
   touchHoldMs?: number;
   /** Pixels a press may wander during the hold (default: 10). */
   touchHoldTolerance?: number;
@@ -96,7 +96,7 @@ export function createReorderList(options: ReorderListOptions) {
   const DRAG_SCALE = options.dragScale ?? 0.97;
   const getStopPropagation = () => options.stopPropagation ?? true;
   const getSkipSelector = () => options.skipSelector ?? DEFAULT_SKIP_SELECTOR;
-  const getTouchHoldMs = () => options.touchHoldMs ?? 0;
+  const getTouchHoldMs = () => options.touchHoldMs ?? DEFAULT_TOUCH_HOLD_MS;
   const getTouchHoldTolerance = () => options.touchHoldTolerance ?? DEFAULT_TOUCH_HOLD_TOLERANCE;
   const getArmedClass = () => options.armedClass ?? DEFAULT_ARMED_CLASS;
 

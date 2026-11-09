@@ -85,7 +85,7 @@ interface ReorderListOptions {
 | `dragScale` | `number` | `0.97` | Scale factor applied to the dragged item via CSS `scale()` transform. Creates a subtle "lift" effect. Set to `1.0` to disable the scale effect entirely. |
 | `stopPropagation` | `boolean` | `true` | Whether to call `e.stopPropagation()` on the pointerdown event. Set to `false` when you have nested reorder lists or need pointer events to bubble to a parent handler. |
 | `skipSelector` | `string` | `'button, input, select, textarea, label, a, [role="button"], [contenteditable]'` | CSS selector matched via `closest()` from the pointerdown target. When matched, drag activation is skipped — guards interactive children from accidental drags. Override when the draggable item itself has interactive semantics (e.g. a `<div role="button">` that IS the draggable). Set to an empty string to disable the skip entirely. The default is also exported as `DEFAULT_SKIP_SELECTOR` for composition: `skipSelector: DEFAULT_SKIP_SELECTOR + ', [data-no-drag]'`. |
-| `touchHoldMs` | `number` | `0` | Milliseconds a touch or pen press must stay down before it can drag. Stops a finger flick across the list from grabbing an item. Moving more than `touchHoldTolerance` or lifting during the hold gives the press up; the long-press menu is suppressed while the finger is down. A mouse never waits. `0` turns the hold off. |
+| `touchHoldMs` | `number` | `200` | Milliseconds a touch or pen press must stay down before it can drag. Stops a finger flick across the list from grabbing an item. Moving more than `touchHoldTolerance` or lifting during the hold gives the press up; the long-press menu is suppressed while the finger is down. A mouse never waits. Set to `0` to turn the hold off and drag on touch at once. |
 | `touchHoldTolerance` | `number` | `10` | Pixels a touch may wander during the hold before it is given up. |
 | `armedClass` | `string` | `'reorder-armed'` | CSS class added to an item once its hold completes, until it is dragged (then `activeClass` takes over) or let go. Style it so the person can see the item is ready to move. |
 
@@ -151,7 +151,7 @@ The ID of the item currently being dragged, or `null`. This is the reactive sign
 
 ### `armedId(): string | null`
 
-The ID of the item whose touch hold has completed but which hasn't started dragging yet, or `null`. Reactive. Always `null` when `touchHoldMs` is `0`.
+The ID of the item whose touch hold has completed but which hasn't started dragging yet, or `null`. Reactive. Always `null` for a mouse, or when `touchHoldMs` is `0`.
 
 ### `targetIndex(): number`
 
@@ -476,7 +476,7 @@ function PinnedGrid() {
 | `stopPropagation` | `boolean` | `true` | Whether to call `e.stopPropagation()` on pointerdown. |
 | `skipSelector` | `string` | `DEFAULT_SKIP_SELECTOR` | CSS selector matched via `closest()` from the pointerdown target. When matched, drag activation is skipped. |
 | `scrollContainer` | `() => HTMLElement \| Window \| null` | — | Reactive accessor returning the scroll container. Snapshot rects are stored in container-content coords (`clientX + container.scrollLeft`); manual scrolls during drag are compensated on each `pointermove`. |
-| `touchHoldMs` | `number` | `0` | Milliseconds a touch or pen press must stay down before it can drag. Stops a finger flick across the list from grabbing an item. Moving more than `touchHoldTolerance` or lifting during the hold gives the press up; the long-press menu is suppressed while the finger is down. A mouse never waits. `0` turns the hold off. |
+| `touchHoldMs` | `number` | `200` | Milliseconds a touch or pen press must stay down before it can drag. Stops a finger flick across the list from grabbing an item. Moving more than `touchHoldTolerance` or lifting during the hold gives the press up; the long-press menu is suppressed while the finger is down. A mouse never waits. Set to `0` to turn the hold off and drag on touch at once. |
 | `touchHoldTolerance` | `number` | `10` | Pixels a touch may wander during the hold before it is given up. |
 | `armedClass` | `string` | `'reorder-armed'` | CSS class added to an item once its hold completes, until it is dragged (then `activeClass` takes over) or let go. Style it so the person can see the item is ready to move. |
 
